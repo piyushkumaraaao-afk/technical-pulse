@@ -19,7 +19,6 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from emergentintegrations.llm.chat import LlmChat, UserMessage
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -30,13 +29,9 @@ DB_NAME = os.environ["DB_NAME"]
 JWT_SECRET = os.environ["JWT_SECRET"]
 JWT_ALGORITHM = os.environ.get("JWT_ALGORITHM", "HS256")
 JWT_EXPIRE_MINUTES = int(os.environ.get("JWT_EXPIRE_MINUTES", 10080))
-EMERGENT_LLM_KEY = os.environ["EMERGENT_LLM_KEY"]
-EMERGENT_PUSH_KEY = os.environ.get("EMERGENT_PUSH_KEY", "placeholder")
 ADMIN_EMAIL = os.environ["ADMIN_EMAIL"]
 ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 
-PUSH_BASE_URL = "https://integrations.emergentagent.com"
-EMERGENT_AUTH_URL = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("careerpulse")
@@ -46,8 +41,6 @@ client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
 
 # HTTP clients (created inside startup for correct event loop)
-_push_client: Optional[httpx.AsyncClient] = None
-_emergent_client: Optional[httpx.AsyncClient] = None
 
 # =======================
 # Pydantic Models
@@ -204,17 +197,6 @@ async def get_current_user(request: Request) -> dict:
         if user:
             return user
 
-    # Then Emergent Google session token
-    session = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
-    if session:
-        exp = session.get("expires_at")
-        if isinstance(exp, datetime):
-            if exp.tzinfo is None:
-                exp = exp.replace(tzinfo=timezone.utc)
-            if exp > datetime.now(timezone.utc):
-                user = await db.users.find_one({"user_id": session["user_id"]}, {"_id": 0, "password_hash": 0})
-                if user:
-                    return user
 
     raise HTTPException(status_code=401, detail="Invalid or expired token")
 
@@ -295,58 +277,6 @@ async def login(body: LoginBody):
     user_public = {k: v for k, v in user.items() if k not in ("password_hash", "_id")}
     return {"access_token": token, "token_type": "bearer", "user": user_public}
 
-
-@api.post("/auth/google-session")
-async def google_session(body: GoogleSessionBody):
-    """Exchange Emergent session_id for a session_token and user."""
-    if _emergent_client is None:
-        raise HTTPException(status_code=500, detail="Emergent client not initialized")
-    try:
-        resp = await _emergent_client.get(EMERGENT_AUTH_URL, headers={"X-Session-ID": body.session_id})
-        if resp.status_code != 200:
-            raise HTTPException(status_code=401, detail="Invalid session_id")
-        data = resp.json()
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Auth provider error: {e}")
-
-    email = data["email"].lower()
-    session_token = data["session_token"]
-
-    existing = await db.users.find_one({"email": email})
-    if existing:
-        user_id = existing["user_id"]
-        await db.users.update_one(
-            {"user_id": user_id},
-            {"$set": {"name": data.get("name", existing.get("name")), "avatar": data.get("picture")}},
-        )
-    else:
-        user_id = f"user_{uuid.uuid4().hex[:12]}"
-        await db.users.insert_one({
-            "user_id": user_id,
-            "email": email,
-            "name": data.get("name", email),
-            "avatar": data.get("picture"),
-            "auth_provider": "google",
-            "is_admin": False,
-            "qualification": None,
-            "branch": None,
-            "passout_year": None,
-            "state": None,
-            "age": None,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        })
-
-    expires_at = datetime.now(timezone.utc) + timedelta(days=7)
-    await db.user_sessions.update_one(
-        {"session_token": session_token},
-        {"$set": {"session_token": session_token, "user_id": user_id, "expires_at": expires_at,
-                  "created_at": datetime.now(timezone.utc)}},
-        upsert=True,
-    )
-    user = await db.users.find_one({"user_id": user_id}, {"_id": 0, "password_hash": 0})
-    return {"access_token": session_token, "token_type": "bearer", "user": user}
 
 
 @api.get("/auth/me")
@@ -594,9 +524,6 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
         "Give concise, practical, encouraging advice. Use markdown-lite (bullet points). Keep answers under 200 words. "
         f"\n\n{profile_ctx}"
     )
-    chat = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=session_id, system_message=system_msg).with_model(
-        "anthropic", "claude-sonnet-4-5-20250929"
-    )
     try:
         resp = await chat.send_message(UserMessage(text=body.message))
         reply = resp if isinstance(resp, str) else str(resp)
@@ -626,22 +553,6 @@ async def ai_history(session_id: Optional[str] = None, user: dict = Depends(get_
 # ---- Push ----
 @api.post("/register-push", status_code=201)
 async def register_push(body: RegisterPushBody, user: dict = Depends(get_current_user)):
-    if _push_client is None:
-        raise HTTPException(status_code=500, detail="Push client unavailable")
-    try:
-        resp = await _push_client.post(
-            "/api/v1/push/users/register",
-            json={"user_id": user["user_id"], "platform": body.platform, "device_token": body.device_token},
-        )
-        if resp.status_code == 401:
-            raise HTTPException(status_code=500, detail="EMERGENT_PUSH_KEY missing or invalid")
-        if resp.status_code >= 500:
-            raise HTTPException(status_code=502, detail="Push provider unavailable")
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.warning(f"register-push failed: {e}")
-        # don't crash - deployment key may not be set yet
     await db.push_devices.update_one(
         {"user_id": user["user_id"], "device_token": body.device_token},
         {"$set": {
@@ -1392,10 +1303,6 @@ async def ensure_indexes():
 
 @app.on_event("startup")
 async def on_startup():
-    global _push_client, _emergent_client
-    _push_client = httpx.AsyncClient(base_url=PUSH_BASE_URL,
-                                     headers={"X-Push-Key": EMERGENT_PUSH_KEY}, timeout=10.0)
-    _emergent_client = httpx.AsyncClient(timeout=10.0)
     await ensure_indexes()
     await seed_admin()
     await seed_jobs()
@@ -1410,10 +1317,7 @@ async def on_shutdown():
         scheduler.shutdown(wait=False)
     except Exception:
         pass
-    if _push_client:
-        await _push_client.aclose()
-    if _emergent_client:
-        await _emergent_client.aclose()
+    
     client.close()
 
 
