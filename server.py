@@ -234,6 +234,14 @@ async def send_push(recipients: List[str], data: dict, idempotency_key: Optional
 app = FastAPI(title="CareerPulse API")
 api = APIRouter(prefix="/api")
 
+@app.get("/")
+async def root():
+    return {"status": "ok", "message": "CareerPulse Backend Running"}
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
+
 
 @api.get("/")
 async def root():
@@ -1329,3 +1337,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+@app.get("/")
+async def root():
+    return {"message": "CareerPulse API running"}
