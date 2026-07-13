@@ -518,6 +518,9 @@ async def delete_resume(resume_id: str, user: dict = Depends(get_current_user)):
 
 
 # ---- AI Career Assistant ----
+import google.generativeai as genai
+# Note: Ensure you have genai.configure(api_key=os.environ.get("GEMINI_API_KEY")) at the top of your file
+
 @api.post("/ai/chat")
 async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
     session_id = body.session_id or f"chat_{user['user_id']}"
@@ -532,9 +535,24 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
         "Give concise, practical, encouraging advice. Use markdown-lite (bullet points). Keep answers under 200 words. "
         f"\n\n{profile_ctx}"
     )
+    
     try:
-        resp = await chat.send_message(UserMessage(text=body.message))
-        reply = resp if isinstance(resp, str) else str(resp)
+        # 1. Gemini Model banayein aur apna system_msg (AI ki personality aur data) usme daalein
+        model = genai.GenerativeModel(
+            model_name="gemini-1.5-flash",
+            system_instruction=system_msg
+        )
+        
+        # 2. 'chat' variable ko yahan define karein (start_chat)
+        chat = model.start_chat(history=[])
+        
+        # 3. Message bhejein. Async API ke liye send_message_async ka use karein
+        # (body.message direct string pass karein, UserMessage wrapper ki zaroorat nahi hai)
+        resp = await chat.send_message_async(body.message)
+        
+        # 4. Text response nikaalein
+        reply = resp.text
+        
     except Exception as e:
         logger.exception("AI chat failed")
         raise HTTPException(status_code=502, detail=f"AI service error: {e}")
@@ -546,6 +564,7 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
         "assistant_message": reply,
         "created_at": datetime.now(timezone.utc).isoformat(),
     })
+    
     return {"reply": reply, "session_id": session_id}
 
 
@@ -1332,8 +1351,8 @@ async def on_shutdown():
 app.include_router(api)
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
