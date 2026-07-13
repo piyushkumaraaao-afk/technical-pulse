@@ -520,7 +520,11 @@ async def delete_resume(resume_id: str, user: dict = Depends(get_current_user)):
 # ---- AI Career Assistant ----
 import os
 from google import genai
-client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+
+client = genai.Client(api_key=os.environ("GEMINI_API_KEY"))
+
+for model in client.models.list():
+    print(model.name)
 
 @api.post("/ai/chat")
 async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
@@ -539,7 +543,7 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
     
     try:    
         response = await client.aio.models.generate_content(
-            model="gemini-3-flash",
+            model="gemini-3.5-flash",
             contents=body.message,
             config={
             "system_instruction": system_msg
