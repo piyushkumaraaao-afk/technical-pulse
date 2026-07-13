@@ -703,6 +703,7 @@ async def refresh_jobs_task() -> tuple[int, int]:
     """Fetch RSS sources, add new jobs, remove expired jobs."""
     added = 0
     today_str = date.today().isoformat()
+    
     # Remove expired
     result = await db.jobs.update_many(
         {"is_active": True, "last_date": {"$lt": today_str}},
@@ -710,7 +711,22 @@ async def refresh_jobs_task() -> tuple[int, int]:
     )
     removed = result.modified_count
 
-    # ---------------------------------------------------------
+    # RSS ingestion (best-effort)
+    sources = await db.rss_sources.find({}, {"_id": 0}).to_list(50)
+    for src in sources:
+        try:
+            feed = await asyncio.to_thread(feedparser.parse, src["url"])
+            for entry in feed.entries[:20]:
+                link = entry.get("link") or ""
+                title = entry.get("title") or "Job Notification"
+                existing = await db.jobs.find_one({"apply_link": link}, {"_id": 0, "job_id": 1})
+                if existing or not link:
+                    continue
+                
+                summary = entry.get("summary", "")[:500]
+                job_id = f"job_{uuid.uuid4().hex[:12]}"
+
+                # ---------------------------------------------------------
                 # NAYA LOGIC: Qualification AND Branch Detection
                 # ---------------------------------------------------------
                 combined_text = (title + " " + summary).lower()
@@ -750,7 +766,7 @@ async def refresh_jobs_task() -> tuple[int, int]:
                     "organization": src["name"],
                     "post_name": title,
                     "category": src.get("default_category", "Government"),
-                    "branches": detected_branches, # <--- Ab yeh khali nahi rahega!
+                    "branches": detected_branches,
                     "qualifications": detected_quals, 
                     "vacancies": None,
                     "salary": None,
