@@ -518,8 +518,8 @@ async def delete_resume(resume_id: str, user: dict = Depends(get_current_user)):
 
 
 # ---- AI Career Assistant ----
-import google.generativeai as genai
-# Note: Ensure you have genai.configure(api_key=os.environ.get("GEMINI_API_KEY")) at the top of your file
+from google import genai
+client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 @api.post("/ai/chat")
 async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
@@ -537,16 +537,15 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
     )
     
     try:
-        model = genai.GenerativeModel(
-            model_name="gemini-2.5-flash-lite",
-            system_instruction=system_msg
+    response = await client.aio.models.generate_content(
+            model="gemini-3-flash",
+            contents=body.message,
+        config={
+            "system_instruction": system_msg
+            }
         )
         
-        chat = model.start_chat(history=[])
-        
-        resp = await chat.send_message_async(body.message)
-        
-        reply = resp.text
+        reply = response.text
         
     except Exception as e:
         logger.exception("AI chat failed")
