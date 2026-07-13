@@ -520,11 +520,14 @@ async def delete_resume(resume_id: str, user: dict = Depends(get_current_user)):
 # ---- AI Career Assistant ----
 import os
 from google import genai
+from fastapi import Depends, HTTPException
+from datetime import datetime, timezone
 
-client = genai.Client(api_key=os.environ("GEMINI_API_KEY"))
+# Fix 1: os.environ.get() ka use karein aur brackets theek karein
+api_key = os.environ.get("GEMINI_API_KEY")
+client = genai.Client(api_key=api_key)
 
-for model in client.models.list():
-    print(model.name)
+# (Model print karne wala for loop main hata raha hu taaki server crash na ho)
 
 @api.post("/ai/chat")
 async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
@@ -542,20 +545,19 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
     )
     
     try:    
+        # Fix 2: Naye Client API ka async function call
         response = await client.aio.models.generate_content(
-            model="gemini-3.5-flash",
+            model="gemini-3.5-flash", 
             contents=body.message,
             config={
-            "system_instruction": system_msg
+                "system_instruction": system_msg
             }
         )
-        
         reply = response.text
         
     except Exception as e:
         logger.exception("AI chat failed")
-        raise HTTPException(status_code=502, detail=f"AI service error: {e}"
-        )
+        raise HTTPException(status_code=502, detail=f"AI service error: {e}")
 
     await db.chat_messages.insert_one({
         "user_id": user["user_id"],
