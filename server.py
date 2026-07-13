@@ -547,7 +547,7 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
     try:    
         # Fix 2: Naye Client API ka async function call
         response = await client.aio.models.generate_content(
-            model="gemini-3.5-flash", 
+            model="gemini-1.5-flash", 
             contents=body.message,
             config={
                 "system_instruction": system_msg
