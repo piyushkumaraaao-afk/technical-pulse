@@ -537,20 +537,19 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
     )
     
     try:
-        # 1. Gemini Model banayein aur apna system_msg (AI ki personality aur data) usme daalein
+        # Available models print karo
+    for m in genai.list_models():
+        print(m.name)
+
         model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash",
+            model_name="gemini-2.5-flash",
             system_instruction=system_msg
         )
         
-        # 2. 'chat' variable ko yahan define karein (start_chat)
         chat = model.start_chat(history=[])
         
-        # 3. Message bhejein. Async API ke liye send_message_async ka use karein
-        # (body.message direct string pass karein, UserMessage wrapper ki zaroorat nahi hai)
         resp = await chat.send_message_async(body.message)
         
-        # 4. Text response nikaalein
         reply = resp.text
         
     except Exception as e:
