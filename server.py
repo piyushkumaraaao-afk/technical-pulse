@@ -537,10 +537,6 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
     )
     
     try:
-        # Available models print karo
-    for m in genai.list_models():
-        print(m.name)
-
         model = genai.GenerativeModel(
             model_name="gemini-2.5-flash",
             system_instruction=system_msg
