@@ -518,6 +518,7 @@ async def delete_resume(resume_id: str, user: dict = Depends(get_current_user)):
 
 
 # ---- AI Career Assistant ----
+import os
 from google import genai
 client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
@@ -536,11 +537,11 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
         f"\n\n{profile_ctx}"
     )
     
-    try:
-    response = await client.aio.models.generate_content(
+    try:    
+        response = await client.aio.models.generate_content(
             model="gemini-3-flash",
             contents=body.message,
-        config={
+            config={
             "system_instruction": system_msg
             }
         )
@@ -549,7 +550,8 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
         
     except Exception as e:
         logger.exception("AI chat failed")
-        raise HTTPException(status_code=502, detail=f"AI service error: {e}")
+        raise HTTPException(status_code=502, detail=f"AI service error: {e}"
+        )
 
     await db.chat_messages.insert_one({
         "user_id": user["user_id"],
