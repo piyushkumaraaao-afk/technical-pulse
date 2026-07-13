@@ -538,7 +538,7 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
     
     try:
         model = genai.GenerativeModel(
-            model_name="gemini-2.5-flash",
+            model_name="gemini-2.0-flash",
             system_instruction=system_msg
         )
         
