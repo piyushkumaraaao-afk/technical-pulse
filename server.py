@@ -539,7 +539,7 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
     try:
         # 1. Gemini Model banayein aur apna system_msg (AI ki personality aur data) usme daalein
         model = genai.GenerativeModel(
-            model_name="gemini-2.0-flash",
+            model_name="gemini-pro",
             system_instruction=system_msg
         )
         
