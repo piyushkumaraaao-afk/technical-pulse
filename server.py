@@ -710,27 +710,48 @@ async def refresh_jobs_task() -> tuple[int, int]:
     )
     removed = result.modified_count
 
-    # RSS ingestion (best-effort)
-    sources = await db.rss_sources.find({}, {"_id": 0}).to_list(50)
-    for src in sources:
-        try:
-            feed = await asyncio.to_thread(feedparser.parse, src["url"])
-            for entry in feed.entries[:20]:
-                link = entry.get("link") or ""
-                title = entry.get("title") or "Job Notification"
-                existing = await db.jobs.find_one({"apply_link": link}, {"_id": 0, "job_id": 1})
-                if existing or not link:
-                    continue
-                summary = entry.get("summary", "")[:500]
-                job_id = f"job_{uuid.uuid4().hex[:12]}"
+    # ---------------------------------------------------------
+                # NAYA LOGIC: Qualification AND Branch Detection
+                # ---------------------------------------------------------
+                combined_text = (title + " " + summary).lower()
+                
+                # 1. Qualification Detect Karein
+                detected_quals = []
+                if any(word in combined_text for word in ["12th", "xii", "intermediate", "10+2"]):
+                    detected_quals.append("12th")
+                if any(word in combined_text for word in ["iti", "ncvt", "scvt", "trade certificate"]):
+                    detected_quals.append("ITI")
+                if any(word in combined_text for word in ["10th", "matric", "ssc"]):
+                    detected_quals.append("10th")
+                if "diploma" in combined_text:
+                    detected_quals.append("Diploma")
+                if any(word in combined_text for word in ["btech", "b.tech", "b.e", "degree", "graduate"]):
+                    detected_quals.append("BTech/BE")
+                
+                if not detected_quals:
+                    detected_quals = ["Not Specified"] # Agar kuch na mile
+                
+                # 2. Branch / Trade Detect Karein
+                detected_branches = []
+                if any(word in combined_text for word in ["civil"]):
+                    detected_branches.append("Civil Engineering")
+                if any(word in combined_text for word in ["mechanical", "fitter", "machinist", "welder"]):
+                    detected_branches.append("Mechanical Engineering")
+                if any(word in combined_text for word in ["electrical", "electrician", "wireman"]):
+                    detected_branches.append("Electrical Engineering")
+                if any(word in combined_text for word in ["electronics"]):
+                    detected_branches.append("Electronics Engineering")
+                if any(word in combined_text for word in ["computer", "it ", "software", "programmer"]):
+                    detected_branches.append("Computer Science")
+                # ---------------------------------------------------------
+
                 await db.jobs.insert_one({
                     "job_id": job_id,
                     "organization": src["name"],
                     "post_name": title,
                     "category": src.get("default_category", "Government"),
-                    "branches": ["Civil Engineering", "Mechanical Engineering", "Electrical Engineering",
-                                 "Electronics Engineering", "Computer Science"],
-                    "qualifications": ["Diploma", "BTech", "BE"],
+                    "branches": detected_branches, # <--- Ab yeh khali nahi rahega!
+                    "qualifications": detected_quals, 
                     "vacancies": None,
                     "salary": None,
                     "eligibility": summary or "See notification",
