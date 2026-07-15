@@ -146,11 +146,15 @@ class RssSourceBody(BaseModel):
     default_category: JobCategory = "Government"
 
 
+from typing import Optional
+from pydantic import BaseModel
+
 class AdminNotifyBody(BaseModel):
     title: str
     message: str
-    branch: Optional[Branch] = None
     action_url: Optional[str] = None
+    branch: Optional[str] = None
+    qualification: Optional[str] = None  # <--- Yeh line add karni hai
 
 
 # =======================
@@ -657,6 +661,11 @@ async def admin_notify(body: AdminNotifyBody, admin: dict = Depends(require_admi
     q: dict = {}
     if body.branch:
         q["branch"] = body.branch
+    # --- YEH LINE ADD KAREIN ---
+    if hasattr(body, 'qualification') and body.qualification:
+        q["qualification"] = body.qualification
+    # ---------------------------
+    
     users = await db.users.find(q, {"_id": 0, "user_id": 1}).to_list(1000)
     recipients = [u["user_id"] for u in users]
     data: dict = {"title": body.title, "message": body.message}
@@ -695,7 +704,34 @@ async def admin_refresh_jobs(admin: dict = Depends(require_admin)):
     added, removed = await refresh_jobs_task()
     return {"added": added, "removed": removed}
 
+# =======================
+# Feedback & User Management (Naya Code)
+# =======================
+class FeedbackBody(BaseModel):
+    message: str
 
+@api.delete("/admin/users/{target_user_id}")
+async def admin_delete_user(target_user_id: str, admin: dict = Depends(require_admin)):
+    await db.users.delete_one({"user_id": target_user_id})
+    return {"ok": True, "msg": "User deleted successfully"}
+
+@api.post("/feedback")
+async def submit_feedback(body: FeedbackBody, user: dict = Depends(get_current_user)):
+    await db.feedback.insert_one({
+        "user_id": user["user_id"],
+        "name": user.get("name", "Unknown"),
+        "email": user.get("email", ""),
+        "message": body.message,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    })
+    return {"ok": True}
+
+@api.get("/admin/feedback")
+async def get_admin_feedback(admin: dict = Depends(require_admin)):
+    feedbacks = await db.feedback.find({}, {"_id": 0}).sort("created_at", -1).to_list(100)
+    return {"feedbacks": feedbacks}
+
+    
 # =======================
 # Jobs Refresh / RSS
 # =======================
