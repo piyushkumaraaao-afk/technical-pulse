@@ -4,11 +4,15 @@ import uuid
 import logging
 import asyncio
 import feedparser
+import requests
+import json
+import httpx
+from bs4 import BeautifulSoup
 from pathlib import Path
 from datetime import datetime, timedelta, timezone, date
 from typing import List, Optional, Literal
+from fastapi.security import HTTPBearer
 
-import httpx
 import jwt
 import bcrypt
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, status
@@ -24,13 +28,13 @@ ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
 
 # Config
-MONGO_URL = os.environ["MONGO_URL"]
-DB_NAME = os.environ["DB_NAME"]
-JWT_SECRET = os.environ["JWT_SECRET"]
+MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
+DB_NAME = os.environ.get("DB_NAME", "careerpulse")
+JWT_SECRET = os.environ.get("JWT_SECRET", "super-secret-key-change-me")
 JWT_ALGORITHM = os.environ.get("JWT_ALGORITHM", "HS256")
 JWT_EXPIRE_MINUTES = int(os.environ.get("JWT_EXPIRE_MINUTES", 10080))
-ADMIN_EMAIL = os.environ["ADMIN_EMAIL"]
-ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@careerpulse.com")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -39,8 +43,77 @@ logger = logging.getLogger("careerpulse")
 # Mongo
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
+_push_client = None
 
-# HTTP clients (created inside startup for correct event loop)
+
+# ==========================================
+# AI SETUP (GROQ API - Super Fast & Free)
+# ==========================================
+GROQ_API_KEY = "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"
+
+import asyncio
+
+async def extract_job_details_with_ai(url: str):
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(url, follow_redirects=True)
+            
+        soup = BeautifulSoup(response.text, 'html.parser')
+        # Token limit bachane ke liye 4000 ki jagah 2500 characters kar diye
+        page_text = soup.get_text(separator=' ', strip=True)[:2500] 
+
+        prompt = f"""
+        Extract the following job details from the text below strictly in JSON format.
+        If info is not found, write "NA".
+        {{
+          "vacancies": "Total number (e.g. 500, or NA)",
+          "salary": "Salary range (e.g. 35k-50k, or NA)",
+          "qualifications": ["B.Tech", "Diploma"],
+          "branches": ["Computer Science"],
+          "location": "City or state (or NA)",
+          "previous_year_cutoff": "Cutoff if mentioned (or NA)",
+          "selection_process": "Exam stages (or NA)",
+          "railway_zone": "RRB/RRC zone (or NA)",
+          "medical_standard": "Required medical standard (or NA)"
+        }}
+        Text: {page_text}
+        """
+        
+        # Groq API ko overload hone se bachane ke liye 4 second ka pause
+        await asyncio.sleep(4)
+        
+        groq_url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "llama-3.1-8b-instant",
+            "messages": [
+                {"role": "system", "content": "You are a JSON data extractor. Always return valid JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            "response_format": {"type": "json_object"}
+        }
+        
+        async with httpx.AsyncClient(timeout=20.0) as ai_client:
+            ai_resp = await ai_client.post(groq_url, headers=headers, json=payload)
+            if ai_resp.status_code != 200:
+                print(f"Groq API Error: {ai_resp.text}")
+                raise Exception("API Request Failed")
+                
+            ai_data = ai_resp.json()
+            raw_text = ai_data['choices'][0]['message']['content'].strip()
+            
+        return json.loads(raw_text)
+        
+    except Exception as e:
+        print(f"AI Scraping Error for {url}:", e)
+        return {
+            "vacancies": "NA", "salary": "NA", "qualifications": [], "branches": [], 
+            "location": "NA", "previous_year_cutoff": "NA", "selection_process": "NA", 
+            "railway_zone": "NA", "medical_standard": "NA"
+        }
 
 # =======================
 # Pydantic Models
@@ -55,21 +128,17 @@ Branch = Literal[
 ]
 JobCategory = Literal["Government", "PSU", "Apprenticeship", "Private", "Internship", "Diploma Eligible"]
 
-
 class RegisterBody(BaseModel):
     email: EmailStr
     password: str
     name: str
 
-
 class LoginBody(BaseModel):
     email: EmailStr
     password: str
 
-
 class GoogleSessionBody(BaseModel):
     session_id: str
-
 
 class ProfileUpdateBody(BaseModel):
     name: Optional[str] = None
@@ -79,7 +148,6 @@ class ProfileUpdateBody(BaseModel):
     state: Optional[str] = None
     age: Optional[int] = None
     avatar: Optional[str] = None
-
 
 class JobBody(BaseModel):
     organization: str
@@ -102,19 +170,17 @@ class JobBody(BaseModel):
     previous_year_cutoff: Optional[str] = None
     selection_process: Optional[str] = None
     important_dates: Optional[str] = None
-
+    railway_zone: Optional[str] = None
+    medical_standard: Optional[str] = None
 
 class EligibilityCheckBody(BaseModel):
     job_id: str
 
-
 class SaveJobBody(BaseModel):
     job_id: str
 
-
 class ApplyJobBody(BaseModel):
     job_id: str
-
 
 class ResumeBody(BaseModel):
     full_name: str
@@ -129,47 +195,42 @@ class ResumeBody(BaseModel):
     certifications: List[str] = Field(default_factory=list)
     template: str = "modern"
 
-
 class ChatBody(BaseModel):
     message: str
     session_id: Optional[str] = None
 
-
 class RegisterPushBody(BaseModel):
     platform: str
     device_token: str
-
 
 class RssSourceBody(BaseModel):
     name: str
     url: str
     default_category: JobCategory = "Government"
 
-
-from typing import Optional
-from pydantic import BaseModel
-
 class AdminNotifyBody(BaseModel):
     title: str
     message: str
     action_url: Optional[str] = None
     branch: Optional[str] = None
-    qualification: Optional[str] = None  # <--- Yeh line add karni hai
+    qualification: Optional[str] = None
 
+class FeedbackBody(BaseModel):
+    message: str
 
 # =======================
 # Auth Utilities
 # =======================
+security = HTTPBearer()
+
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-
 
 def verify_password(password: str, hashed: str) -> bool:
     try:
         return bcrypt.checkpw(password.encode(), hashed.encode())
     except Exception:
         return False
-
 
 def create_jwt(user_id: str) -> str:
     payload = {
@@ -179,7 +240,6 @@ def create_jwt(user_id: str) -> str:
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
-
 def decode_jwt(token: str) -> Optional[str]:
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
@@ -187,13 +247,8 @@ def decode_jwt(token: str) -> Optional[str]:
     except Exception:
         return None
 
-
-async def get_current_user(request: Request) -> dict:
-    auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing token")
-    token = auth[7:]
-
+async def get_current_user(request: Request, auth = Depends(security)) -> dict:
+    token = auth.credentials
     # Try JWT first
     user_id = decode_jwt(token)
     if user_id:
@@ -201,9 +256,14 @@ async def get_current_user(request: Request) -> dict:
         if user:
             return user
 
-
     raise HTTPException(status_code=401, detail="Invalid or expired token")
 
+async def require_admin(user: dict = Depends(get_current_user)) -> dict:
+    if not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user
+
+    raise HTTPException(status_code=401, detail="Invalid or expired token")
 
 async def require_admin(user: dict = Depends(get_current_user)) -> dict:
     if not user.get("is_admin"):
@@ -236,20 +296,29 @@ async def send_push(recipients: List[str], data: dict, idempotency_key: Optional
 # App / Router
 # =======================
 app = FastAPI(title="CareerPulse API")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 api = APIRouter(prefix="/api")
 
+
+# 1. Main Base URL (http://127.0.0.1:8000/)
 @app.get("/")
-async def root():
+async def main_root():
     return {"status": "ok", "message": "CareerPulse Backend Running"}
 
+# 2. Server Health Check URL
 @app.get("/health")
 async def health():
     return {"status": "healthy"}
 
-
 @api.get("/")
-async def root():
-    return {"app": "CareerPulse", "status": "ok"}
+async def api_root():
+    return {"app": "CareerPulse API", "status": "ok"}
 
 
 # ---- Auth ----
@@ -290,7 +359,6 @@ async def login(body: LoginBody):
     return {"access_token": token, "token_type": "bearer", "user": user_public}
 
 
-
 @api.get("/auth/me")
 async def me(user: dict = Depends(get_current_user)):
     return {"user": user}
@@ -317,7 +385,6 @@ async def update_profile(body: ProfileUpdateBody, user: dict = Depends(get_curre
 def _clean_job(job: dict) -> dict:
     job.pop("_id", None)
     return job
-
 
 @api.get("/jobs")
 async def list_jobs(
@@ -522,43 +589,34 @@ async def delete_resume(resume_id: str, user: dict = Depends(get_current_user)):
 
 
 # ---- AI Career Assistant ----
-import os
-from google import genai
-from fastapi import Depends, HTTPException
-from datetime import datetime, timezone
-
-# Fix 1: os.environ.get() ka use karein aur brackets theek karein
-api_key = os.environ.get("GEMINI_API_KEY")
-client = genai.Client(api_key=api_key)
-
-# (Model print karne wala for loop main hata raha hu taaki server crash na ho)
-
 @api.post("/ai/chat")
 async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
     session_id = body.session_id or f"chat_{user['user_id']}"
     profile_ctx = (
-        f"Student profile — Name: {user.get('name')}, Qualification: {user.get('qualification') or 'not set'}, "
-        f"Branch: {user.get('branch') or 'not set'}, Passout Year: {user.get('passout_year') or 'not set'}, "
-        f"State: {user.get('state') or 'not set'}."
-    )
-    system_msg = (
-        "You are CareerPulse Assistant, a friendly Indian career advisor for Diploma and BTech engineering students. "
-        "Help them find suitable government, PSU, private jobs, apprenticeships, internships. "
-        "Give concise, practical, encouraging advice. Use markdown-lite (bullet points). Keep answers under 200 words. "
-        f"\n\n{profile_ctx}"
+        f"Student profile: {user.get('name')}, Qualification: {user.get('qualification')}, Branch: {user.get('branch')}."
     )
     
     try:    
-        # Fix 2: Naye Client API ka async function call
-        response = await client.aio.models.generate_content(
-            model="gemini-2.0-flash-8b", 
-            contents=body.message,
-            config={
-                "system_instruction": system_msg
-            }
-        )
-        reply = response.text
+        groq_url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "llama3.1-8b-instant",
+            "messages": [
+                {"role": "system", "content": "You are CareerPulse Assistant, a helpful career advisor for students in India. Keep answers under 150 words."},
+                {"role": "user", "content": f"Profile: {profile_ctx}\nQuestion: {body.message}"}
+            ]
+        }
         
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(groq_url, headers=headers, json=payload)
+            if resp.status_code != 200:
+                raise Exception("AI API Error")
+            data = resp.json()
+            reply = data['choices'][0]['message']['content']
+            
     except Exception as e:
         logger.exception("AI chat failed")
         raise HTTPException(status_code=502, detail=f"AI service error: {e}")
@@ -600,32 +658,87 @@ async def register_push(body: RegisterPushBody, user: dict = Depends(get_current
 
 
 # ---- Admin ----
-@api.post("/admin/jobs")
-async def admin_create_job(body: JobBody, admin: dict = Depends(require_admin)):
-    job_id = f"job_{uuid.uuid4().hex[:12]}"
-    doc = {"job_id": job_id, **body.model_dump(), "is_active": True,
-           "source": "admin", "created_at": datetime.now(timezone.utc).isoformat()}
-    await db.jobs.insert_one(doc)
-    # Notify eligible users
-    try:
-        query: dict = {}
-        if body.branches:
-            query["branch"] = {"$in": body.branches}
-        eligible = await db.users.find(query, {"_id": 0, "user_id": 1}).to_list(500)
-        recipients = [u["user_id"] for u in eligible]
-        if recipients:
-            await send_push(
-                recipients=recipients,
-                data={"title": f"New Job: {body.post_name}",
-                      "message": f"{body.organization} — Last date {body.last_date}",
-                      "action_url": f"/job/{job_id}"},
-                idempotency_key=f"newjob-{job_id}",
-            )
-    except Exception as e:
-        logger.warning(f"push after job create failed: {e}")
-    doc.pop("_id", None)
-    return {"job": doc}
+# Yeh aapki backend API file hogi (e.g., main.py ya admin.py)
 
+@app.post("/admin/jobs")
+async def create_admin_job(data: dict): # Ya jo bhi aapka Pydantic schema ho
+    
+    # 🚀 STEP 1: Frontend se aa raha post_type get karein (Agar na aaye toh 'Job' default set kardein)
+    post_type = data.get("post_type", "Job") 
+
+    job_id = f"job_{uuid.uuid4().hex[:12]}"
+
+    # Database Entry
+    new_post = {
+        "job_id": job_id,
+        "organization": data.get("organization"),
+        "post_name": data.get("post_name"),
+        "category": data.get("category", "Government"),
+        
+        # 🚀 STEP 2: YAHAN POST TYPE KO DATABASE MEIN SAVE KARAYEIN
+        "post_type": post_type, 
+        
+        "branches": data.get("branches", []),
+        "qualifications": data.get("qualifications", []),
+        "vacancies": data.get("vacancies", "NA"),
+        "salary": data.get("salary", "NA"),
+        "eligibility": data.get("eligibility", ""),
+        "location": data.get("location", "India"),
+        "last_date": data.get("last_date"),
+        "apply_link": data.get("apply_link"),
+        "notification_pdf": data.get("notification_pdf"),
+        "min_age": data.get("min_age"),
+        "max_age": data.get("max_age"),
+        "description": data.get("description"),
+        "is_trending": False # Default
+    }
+
+    await db.jobs.insert_one(new_post)
+    return {"message": "Post created successfully"}
+
+
+from fastapi import Request
+
+# 1. Trending status change karne ke liye API
+@app.patch("/admin/jobs/{job_id}")
+async def update_job_status(job_id: str, request: Request):
+    data = await request.json()
+    is_trending = data.get("is_trending")
+    
+    result = await db.jobs.update_one(
+        {"job_id": job_id}, 
+        {"$set": {"is_trending": is_trending}}
+    )
+    
+    if result.modified_count == 0:
+        return {"success": False, "message": "Job not found or not updated"}
+    return {"success": True, "message": "Trending status updated"}
+
+
+# 2. User ko Premium aur Block karne ke liye API
+from bson import ObjectId
+
+@app.patch("/admin/users/{user_id}")
+async def update_user_status(user_id: str, request: Request):
+    data = await request.json()
+    
+    update_data = {}
+    if "is_premium" in data:
+        update_data["is_premium"] = data["is_premium"]
+    if "is_blocked" in data:
+        update_data["is_blocked"] = data["is_blocked"]
+        
+    # 💡 Smart Query: Chahe user_id match kare ya MongoDB ki _id, dono ko check karega
+    query = {"$or": [{"user_id": user_id}]}
+    if ObjectId.is_valid(user_id):
+        query["$or"].append({"_id": ObjectId(user_id)})
+
+    result = await db.users.update_one(query, {"$set": update_data})
+    
+    if result.modified_count == 0:
+        return {"success": False, "message": "User not found"}
+        
+    return {"success": {"message": "User updated successfully"}}
 
 @api.put("/admin/jobs/{job_id}")
 async def admin_update_job(job_id: str, body: JobBody, admin: dict = Depends(require_admin)):
@@ -661,10 +774,8 @@ async def admin_notify(body: AdminNotifyBody, admin: dict = Depends(require_admi
     q: dict = {}
     if body.branch:
         q["branch"] = body.branch
-    # --- YEH LINE ADD KAREIN ---
     if hasattr(body, 'qualification') and body.qualification:
         q["qualification"] = body.qualification
-    # ---------------------------
     
     users = await db.users.find(q, {"_id": 0, "user_id": 1}).to_list(1000)
     recipients = [u["user_id"] for u in users]
@@ -705,11 +816,8 @@ async def admin_refresh_jobs(admin: dict = Depends(require_admin)):
     return {"added": added, "removed": removed}
 
 # =======================
-# Feedback & User Management (Naya Code)
+# Feedback & User Management 
 # =======================
-class FeedbackBody(BaseModel):
-    message: str
-
 @api.delete("/admin/users/{target_user_id}")
 async def admin_delete_user(target_user_id: str, admin: dict = Depends(require_admin)):
     await db.users.delete_one({"user_id": target_user_id})
@@ -731,99 +839,171 @@ async def get_admin_feedback(admin: dict = Depends(require_admin)):
     feedbacks = await db.feedback.find({}, {"_id": 0}).sort("created_at", -1).to_list(100)
     return {"feedbacks": feedbacks}
 
-    
+
 # =======================
-# Jobs Refresh / RSS
+# Level 2 AI Scraper Logic Fix
 # =======================
 async def refresh_jobs_task() -> tuple[int, int]:
-    """Fetch RSS sources, add new jobs, remove expired jobs."""
+    """Fetch RSS/HTML sources, add new jobs, remove expired jobs."""
     added = 0
     today_str = date.today().isoformat()
     
-    # Remove expired
+    # 1. Expired jobs ko deactivate karein 
     result = await db.jobs.update_many(
         {"is_active": True, "last_date": {"$lt": today_str}},
         {"$set": {"is_active": False}},
     )
     removed = result.modified_count
 
-    # RSS ingestion (best-effort)
+    # 2. Ingestion Logic
     sources = await db.rss_sources.find({}, {"_id": 0}).to_list(50)
+    
+    # Browser identity simulate karne ke liye headers
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.google.com/"
+    }
+
     for src in sources:
         try:
-            feed = await asyncio.to_thread(feedparser.parse, src["url"])
-            for entry in feed.entries[:20]:
-                link = entry.get("link") or ""
-                title = entry.get("title") or "Job Notification"
-                existing = await db.jobs.find_one({"apply_link": link}, {"_id": 0, "job_id": 1})
-                if existing or not link:
+            entries_to_process = []
+            src_name_lower = src["name"].lower()
+
+            # --- Fetch raw links from Sarkari / FreeJobAlert ---
+            if "sarkari" in src_name_lower or "freejob" in src_name_lower:
+                response = await asyncio.to_thread(requests.get, src["url"], headers=headers, timeout=15)
+                
+                if response.status_code == 200:
+                    if "<?xml" in response.text[:50].lower() or "<rss" in response.text[:50].lower():
+                        soup = BeautifulSoup(response.content, "xml")
+                        items = soup.find_all("item")
+                        for item in items[:20]:
+                            title_tag = item.find("title")
+                            link_tag = item.find("link")
+                            if title_tag and link_tag:
+                                entries_to_process.append({
+                                    "title": title_tag.text.strip(),
+                                    "link": link_tag.text.strip(),
+                                    "summary": f"Latest notification on {src['name']}."
+                                })
+                    else:
+                        soup = BeautifulSoup(response.text, "html.parser")
+                        for link_tag in soup.find_all("a")[:20]: 
+                            title = link_tag.text.strip()
+                            link = link_tag.get("href") or ""
+                            if link and len(title) > 8 and ("latestjob" in link or "job" in link or "notification" in link or "apply" in link):
+                                entries_to_process.append({
+                                    "title": title,
+                                    "link": link,
+                                    "summary": f"Latest notification on {src['name']}."
+                                })
+            else:
+                # Normal standard RSS Feed
+                feed = await asyncio.to_thread(feedparser.parse, src["url"])
+                for entry in feed.entries[:10]:
+                    entries_to_process.append({
+                        "title": entry.get("title") or "Job Notification",
+                        "link": entry.get("link") or "",
+                        "summary": entry.get("summary", "")[:500]
+                    })
+
+            # --- 3. COMMON DB INGESTION LOGIC & AI MAGIC ---
+            for entry in entries_to_process:
+                job_link = entry["link"]
+                job_title = entry["title"]
+                summary = entry["summary"]
+
+                if not job_link:
+                    continue
+
+                # === SMART CATEGORIZATION LOGIC ===
+                title_lower = job_title.lower()
+                post_type = "Job" # Default category
+                
+                if "result" in title_lower:
+                    post_type = "Result"
+                elif any(word in title_lower for word in ["admit card", "hall ticket", "call letter"]):
+                    post_type = "Admit Card"
+                elif "syllabus" in title_lower:
+                    post_type = "Syllabus"
+                elif "answer key" in title_lower:
+                    post_type = "Answer Key"
+                elif any(word in title_lower for word in ["exam date", "date sheet", "schedule"]):
+                    post_type = "Upcoming Exam"
+                # ==================================
+
+                # Duplicate check
+                existing = await db.jobs.find_one({"apply_link": job_link}, {"_id": 0, "job_id": 1})
+                if existing:
                     continue
                 
-                summary = entry.get("summary", "")[:500]
+                print(f"Deep scraping [{post_type}]: {job_title}")
+                ai_details = await extract_job_details_with_ai(job_link)
+                
                 job_id = f"job_{uuid.uuid4().hex[:12]}"
+                
+                # Agar AI empty output deta hai to hum manual logic fail-safe as a backup use karte hain
+                detected_quals = ai_details.get("qualifications", [])
+                detected_branches = ai_details.get("branches", [])
+                
+                if not detected_quals or not detected_branches:
+                    combined_text = (job_title + " " + summary).lower()
+                    if not detected_quals:
+                        if any(word in combined_text for word in ["12th", "xii", "intermediate", "10+2"]): detected_quals.append("12th")
+                        if any(word in combined_text for word in ["iti", "ncvt", "scvt"]): detected_quals.append("ITI")
+                        if any(word in combined_text for word in ["10th", "matric", "ssc"]): detected_quals.append("10th")
+                        if "diploma" in combined_text: detected_quals.append("Diploma")
+                        if any(word in combined_text for word in ["btech", "b.tech", "b.e", "degree", "graduate"]): detected_quals.append("BTech")
+                    
+                    if not detected_branches:
+                        if "civil" in combined_text: detected_branches.append("Civil Engineering")
+                        if any(word in combined_text for word in ["mechanical", "fitter", "machinist"]): detected_branches.append("Mechanical Engineering")
+                        if any(word in combined_text for word in ["electrical", "electrician"]): detected_branches.append("Electrical Engineering")
+                        if "electronics" in combined_text: detected_branches.append("Electronics Engineering")
+                        if any(word in combined_text for word in ["computer", "it ", "software"]): detected_branches.append("Computer Science")
+                        
+                    if not detected_quals: detected_quals = ["Not Specified"]
 
-                # ---------------------------------------------------------
-                # NAYA LOGIC: Qualification AND Branch Detection
-                # ---------------------------------------------------------
-                combined_text = (title + " " + summary).lower()
-                
-                # 1. Qualification Detect Karein
-                detected_quals = []
-                if any(word in combined_text for word in ["12th", "xii", "intermediate", "10+2"]):
-                    detected_quals.append("12th")
-                if any(word in combined_text for word in ["iti", "ncvt", "scvt", "trade certificate"]):
-                    detected_quals.append("ITI")
-                if any(word in combined_text for word in ["10th", "matric", "ssc"]):
-                    detected_quals.append("10th")
-                if "diploma" in combined_text:
-                    detected_quals.append("Diploma")
-                if any(word in combined_text for word in ["btech", "b.tech", "b.e", "degree", "graduate"]):
-                    detected_quals.append("BTech/BE")
-                
-                if not detected_quals:
-                    detected_quals = ["Not Specified"] # Agar kuch na mile
-                
-                # 2. Branch / Trade Detect Karein
-                detected_branches = []
-                if any(word in combined_text for word in ["civil"]):
-                    detected_branches.append("Civil Engineering")
-                if any(word in combined_text for word in ["mechanical", "fitter", "machinist", "welder"]):
-                    detected_branches.append("Mechanical Engineering")
-                if any(word in combined_text for word in ["electrical", "electrician", "wireman"]):
-                    detected_branches.append("Electrical Engineering")
-                if any(word in combined_text for word in ["electronics"]):
-                    detected_branches.append("Electronics Engineering")
-                if any(word in combined_text for word in ["computer", "it ", "software", "programmer"]):
-                    detected_branches.append("Computer Science")
-                # ---------------------------------------------------------
-
+                # Database Entry
                 await db.jobs.insert_one({
                     "job_id": job_id,
                     "organization": src["name"],
-                    "post_name": title,
+                    "post_name": job_title,
                     "category": src.get("default_category", "Government"),
+                    
+                    "post_type": post_type,  # ---> APP MEIN FILTER KARNE KE LIYE <---
+                    
                     "branches": detected_branches,
                     "qualifications": detected_quals, 
-                    "vacancies": None,
-                    "salary": None,
-                    "eligibility": summary or "See notification",
-                    "location": "India",
+                    "vacancies": ai_details.get("vacancies", "NA"),
+                    "salary": ai_details.get("salary", "NA"),
+                    "eligibility": summary,
+                    "location": ai_details.get("location", "India"),
                     "last_date": (date.today() + timedelta(days=30)).isoformat(),
                     "notification_pdf": None,
-                    "apply_link": link,
-                    "min_age": 18,
-                    "max_age": 35,
+                    "apply_link": job_link,
+                    
+                    # ---> AI WALI AGE LIMIT YAHAN UPDATE KI HAI <---
+                    "min_age": ai_details.get("min_age") or 18, 
+                    "max_age": ai_details.get("max_age") or 35,
+                    
                     "description": summary,
                     "logo_url": None,
+                    "previous_year_cutoff": ai_details.get("previous_year_cutoff", "NA"),
+                    "selection_process": ai_details.get("selection_process", "NA"),
+                    "railway_zone": ai_details.get("railway_zone", "NA"),
+                    "medical_standard": ai_details.get("medical_standard", "NA"),
                     "is_active": True,
-                    "source": f"rss:{src['name']}",
+                    "source": f"scraper:{src['name']}" if "sarkari" in src_name_lower or "freejob" in src_name_lower else f"rss:{src['name']}",
                     "created_at": datetime.now(timezone.utc).isoformat(),
                 })
                 added += 1
-        except Exception as e:
-            logger.warning(f"RSS fetch failed for {src.get('name')}: {e}")
 
-    logger.info(f"Refresh jobs: +{added} added, {removed} expired")
+        except Exception as e:
+            logger.warning(f"Fetch failed for {src.get('name')}: {e}")
+
+    logger.info(f"Refresh jobs complete: +{added} added, {removed} expired")
     return added, removed
 
 
@@ -831,7 +1011,6 @@ async def refresh_jobs_task() -> tuple[int, int]:
 # Startup / Seed
 # =======================
 scheduler = AsyncIOScheduler()
-
 
 async def seed_admin():
     existing = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
@@ -856,6 +1035,24 @@ async def seed_admin():
             "age": None,
             "created_at": datetime.now(timezone.utc).isoformat(),
         })
+
+@app.on_event("startup")
+async def startup_event():
+    global _push_client
+    _push_client = httpx.AsyncClient(base_url="https://push-service-placeholder.com")
+    await seed_admin()
+    scheduler.add_job(refresh_jobs_task, 'interval', hours=12)
+    scheduler.start()
+    logger.info("CareerPulse Background Services Started Successfully")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    global _push_client
+    if _push_client:
+        await _push_client.aclose()
+    scheduler.shutdown()
+
+app.include_router(api)
 
 
 SAMPLE_JOBS = [
@@ -1404,13 +1601,17 @@ async def ensure_indexes():
 
 
 @app.on_event("startup")
-async def on_startup():
-    await ensure_indexes()
+async def startup_event():
+    global _push_client
+    _push_client = httpx.AsyncClient(base_url="https://push-service-placeholder.com")
     await seed_admin()
-    await seed_jobs()
-    scheduler.add_job(refresh_jobs_task, "interval", hours=1, id="refresh_jobs", replace_existing=True)
-    scheduler.start()
-    logger.info("CareerPulse backend started")
+    
+    # Check karein ki scheduler pehle se to nahi chal raha
+    if not scheduler.running:
+        scheduler.add_job(refresh_jobs_task, 'interval', hours=12)
+        scheduler.start()
+        
+    logger.info("CareerPulse Background Services Started Successfully")
 
 
 @app.on_event("shutdown")
@@ -1431,6 +1632,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-@app.get("/")
-async def root():
-    return {"message": "CareerPulse API running"}
+
+    # Check kariye kya aapke server.py ke end me aisa kuch hai:
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("server:app", host="127.0.0.1", port=8000, reload=True)

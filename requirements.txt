@@ -124,3 +124,5 @@ watchfiles==1.2.0
 websockets==16.0
 yarl==1.24.2
 zipp==4.1.0
+requests==2.32.3
+beautifulsoup4==4.12.3
