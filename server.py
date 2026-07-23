@@ -707,7 +707,7 @@ async def register_push(body: RegisterPushBody, user: dict = Depends(get_current
 # ---- Admin ----
 # Yeh aapki backend API file hogi (e.g., main.py ya admin.py)
 
-@app.post("/admin/jobs")
+@api.post("/admin/jobs")
 async def create_admin_job(data: dict): # Ya jo bhi aapka Pydantic schema ho
     
     # 🚀 STEP 1: Frontend se aa raha post_type get karein (Agar na aaye toh 'Job' default set kardein)
@@ -720,7 +720,7 @@ async def create_admin_job(data: dict): # Ya jo bhi aapka Pydantic schema ho
         "job_id": job_id,
         "organization": data.get("organization"),
         "post_name": data.get("post_name"),
-        "post_type": data.get("post_type"),
+        "post_type": "post_type",
         "category": data.get("category", "Government"),
         
         # 🚀 STEP 2: YAHAN POST TYPE KO DATABASE MEIN SAVE KARAYEIN 
@@ -744,8 +744,6 @@ async def create_admin_job(data: dict): # Ya jo bhi aapka Pydantic schema ho
     await db.jobs.insert_one(new_post)
     return {"message": "Post created successfully"}
 
-
-from fastapi import Request
 
 # 1. Trending status change karne ke liye API
 @api.patch("/admin/users/{user_id}")
