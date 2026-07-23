@@ -311,6 +311,40 @@ api = APIRouter(prefix="/api")
 async def main_root():
     return {"status": "ok", "message": "CareerPulse Backend Running"}
 
+@app.get("/admin/users")
+async def get_all_users(admin = Depends(require_admin)):
+    users_cursor = db.users.find({})
+    users_list = []
+    async for u in users_cursor:
+        users_list.append({
+            "user_id": str(u.get("user_id") or u.get("_id")), # Ensure ID hamesha jaye
+            "name": u.get("name"),
+            "email": u.get("email"),
+            "branch": u.get("branch"),
+            "qualification": u.get("qualification"),
+            "state": u.get("state"),
+            "is_premium": u.get("is_premium", False),
+            "is_blocked": u.get("is_blocked", False),
+            "avatar": u.get("avatar")
+        })
+    return {"users": users_list}
+
+@app.get("/jobs")
+async def get_all_jobs(limit: int = 100):
+    jobs_cursor = db.jobs.find({}).limit(limit)
+    jobs_list = []
+    async for j in jobs_cursor:
+        jobs_list.append({
+            "job_id": str(j.get("job_id") or j.get("_id")), # Ensure job_id hamesha jaye
+            "post_name": j.get("post_name"),
+            "organization": j.get("organization"),
+            "post_type": j.get("post_type", "Job"),
+            "is_trending": j.get("is_trending", False),
+            # ... baaki fields
+        })
+    return {"jobs": jobs_list}
+
+    
 # 2. Server Health Check URL
 @app.get("/health")
 async def health():
