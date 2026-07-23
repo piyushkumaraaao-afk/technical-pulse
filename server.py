@@ -12,6 +12,7 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone, date
 from typing import List, Optional, Literal
 from fastapi.security import HTTPBearer
+from fastapi import Query
 
 import jwt
 import bcrypt
@@ -153,6 +154,7 @@ class ProfileUpdateBody(BaseModel):
 class JobBody(BaseModel):
     organization: str
     post_name: str
+    post_type: str
     category: JobCategory
     branches: List[Branch]
     qualifications: List[Qualification]
@@ -330,21 +332,6 @@ async def get_all_users(admin = Depends(require_admin)):
         })
     return {"users": users_list}
 
-@app.get("/jobs")
-async def get_all_jobs(limit: int = 100):
-    jobs_cursor = db.jobs.find({}).limit(limit)
-    jobs_list = []
-    async for j in jobs_cursor:
-        jobs_list.append({
-            "job_id": str(j.get("job_id") or j.get("_id")), # Ensure job_id hamesha jaye
-            "post_name": j.get("post_name"),
-            "organization": j.get("organization"),
-            "post_type": j.get("post_type", "Job"),
-            "is_trending": j.get("is_trending", False),
-            # ... baaki fields
-        })
-    return {"jobs": jobs_list}
-
 
 # 2. Server Health Check URL
 @app.get("/health")
@@ -422,6 +409,22 @@ def _clean_job(job: dict) -> dict:
     job.pop("_id", None)
     return job
 
+
+@app.get("/jobs")
+async def get_all_jobs(limit: int = 100):
+    jobs_cursor = db.jobs.find({}).limit(limit)
+    jobs_list = []
+    async for j in jobs_cursor:
+        jobs_list.append({
+            "job_id": str(j.get("job_id") or j.get("_id")), # Ensure job_id hamesha jaye
+            "post_name": j.get("post_name"),
+            "post_type": j.get("post_type", "Job"),
+            "organization": j.get("organization"),
+                       "is_trending": j.get("is_trending", False),
+            # ... baaki fields
+        })
+    return {"jobs": jobs_list}
+
 @api.get("/jobs")
 async def list_jobs(
     category: Optional[str] = None,
@@ -431,9 +434,15 @@ async def list_jobs(
     state: Optional[str] = None,
     age: Optional[int] = None,
     search: Optional[str] = None,
+    post_type: Optional[str] = None, # 🚀 Naya parameter add kiya
     limit: int = 50,
 ):
     q: dict = {"is_active": True}
+    
+    # Agar frontend se post_type (jaise 'Job', 'Admit Card', etc.) aaya hai toh filter karein
+    if post_type and post_type != "All":
+        q["post_type"] = post_type
+        
     if category and category != "All":
         q["category"] = category
     if branch and branch != "All":
@@ -455,9 +464,11 @@ async def list_jobs(
     if search:
         q["$or"] = [
             {"post_name": {"$regex": search, "$options": "i"}},
+            {"post_type": {"$regex": search, "$options": "i"}},
             {"organization": {"$regex": search, "$options": "i"}},
             {"location": {"$regex": search, "$options": "i"}},
         ]
+        
     cursor = db.jobs.find(q, {"_id": 0}).sort("last_date", 1).limit(limit)
     jobs = await cursor.to_list(length=limit)
     return {"jobs": jobs, "count": len(jobs)}
@@ -465,7 +476,7 @@ async def list_jobs(
 
 @api.get("/jobs/recommended")
 async def recommended_jobs(user: dict = Depends(get_current_user)):
-    q: dict = {"is_active": True}
+    q: dict = {"is_active": True, "post_type": "Job"}
     if user.get("branch"):
         q["branches"] = user["branch"]
     if user.get("qualification"):
@@ -709,10 +720,10 @@ async def create_admin_job(data: dict): # Ya jo bhi aapka Pydantic schema ho
         "job_id": job_id,
         "organization": data.get("organization"),
         "post_name": data.get("post_name"),
+        "post_type": data.get("post_type"),
         "category": data.get("category", "Government"),
         
-        # 🚀 STEP 2: YAHAN POST TYPE KO DATABASE MEIN SAVE KARAYEIN
-        "post_type": post_type, 
+        # 🚀 STEP 2: YAHAN POST TYPE KO DATABASE MEIN SAVE KARAYEIN 
         
         "branches": data.get("branches", []),
         "qualifications": data.get("qualifications", []),
@@ -726,6 +737,7 @@ async def create_admin_job(data: dict): # Ya jo bhi aapka Pydantic schema ho
         "min_age": data.get("min_age"),
         "max_age": data.get("max_age"),
         "description": data.get("description"),
+        "is_active": True,
         "is_trending": False # Default
     }
 
@@ -1021,9 +1033,8 @@ async def refresh_jobs_task() -> tuple[int, int]:
                     "job_id": job_id,
                     "organization": src["name"],
                     "post_name": job_title,
-                    "category": src.get("default_category", "Government"),
-                    
                     "post_type": post_type,  # ---> APP MEIN FILTER KARNE KE LIYE <---
+                    "category": src.get("default_category", "Government"),
                     
                     "branches": detected_branches,
                     "qualifications": detected_quals, 
