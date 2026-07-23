@@ -142,6 +142,7 @@ class GoogleSessionBody(BaseModel):
 
 class ProfileUpdateBody(BaseModel):
     name: Optional[str] = None
+    phone: Optional[int] = None
     qualification: Optional[Qualification] = None
     branch: Optional[Branch] = None
     passout_year: Optional[int] = None
@@ -366,6 +367,7 @@ async def register(body: RegisterBody):
         "user_id": user_id,
         "email": body.email.lower(),
         "name": body.name,
+        "phone": body.phone,
         "password_hash": hash_password(body.password),
         "auth_provider": "email",
         "is_admin": False,
@@ -734,12 +736,26 @@ async def create_admin_job(data: dict): # Ya jo bhi aapka Pydantic schema ho
 from fastapi import Request
 
 # 1. Trending status change karne ke liye API
-@app.patch("/admin/jobs/{job_id}")
-async def update_job(job_id: str, request: Request, admin = Depends(require_admin)):
+@api.patch("/admin/users/{user_id}")
+async def update_user_status(user_id: str, request: Request, admin: dict = Depends(require_admin)):
     data = await request.json()
-    # Database update logic yahan hoga
-    await db.jobs.update_one({"$or": [{"job_id": job_id}, {"_id": job_id}]}, {"$set": data})
-    return {"success": True, "message": "Updated successfully"}
+    
+    update_data = {}
+    if "is_premium" in data:
+        update_data["is_premium"] = data["is_premium"]
+    if "is_blocked" in data:
+        update_data["is_blocked"] = data["is_blocked"]
+        
+    query = {"$or": [{"user_id": user_id}]}
+    if ObjectId.is_valid(user_id):
+        query["$or"].append({"_id": ObjectId(user_id)})
+
+    result = await db.users.update_one(query, {"$set": update_data})
+    
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="User not found")
+        
+    return {"success": True, "message": "User updated successfully"}
 
 
 # 2. User ko Premium aur Block karne ke liye API
@@ -768,11 +784,19 @@ async def update_user_status(user_id: str, request: Request):
     return {"success": {"message": "User updated successfully"}}
 
 @api.put("/admin/jobs/{job_id}")
-async def admin_update_job(job_id: str, body: JobBody, admin: dict = Depends(require_admin)):
-    result = await db.jobs.update_one({"job_id": job_id}, {"$set": body.model_dump()})
+async def admin_update_job(job_id: str, request: Request, admin: dict = Depends(require_admin)):
+    data = await request.json()
+    
+    # Smart query jo job_id aur _id dono check karegi
+    query = {"$or": [{"job_id": job_id}]}
+    if ObjectId.is_valid(job_id):
+        query["$or"].append({"_id": ObjectId(job_id)})
+
+    result = await db.jobs.update_one(query, {"$set": data})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Job not found")
-    updated = await db.jobs.find_one({"job_id": job_id}, {"_id": 0})
+        
+    updated = await db.jobs.find_one(query, {"_id": 0})
     return {"job": updated}
 
 
