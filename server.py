@@ -442,7 +442,7 @@ async def list_jobs(
     # Agar frontend se post_type (jaise 'Job', 'Admit Card', etc.) aaya hai toh filter karein
     if post_type and post_type != "All":
         q["post_type"] = post_type
-        elif not post_type:
+    elif not post_type:
         q["post_type"] = "Job"
         
     if category and category != "All":
