@@ -720,7 +720,7 @@ async def create_admin_job(data: dict): # Ya jo bhi aapka Pydantic schema ho
         "job_id": job_id,
         "organization": data.get("organization"),
         "post_name": data.get("post_name"),
-        "post_type": "post_type",
+        "post_type": data.get("post_type", "Job"),
         "category": data.get("category", "Government"),
         
         # 🚀 STEP 2: YAHAN POST TYPE KO DATABASE MEIN SAVE KARAYEIN 
