@@ -344,7 +344,7 @@ async def get_all_jobs(limit: int = 100):
         })
     return {"jobs": jobs_list}
 
-    
+
 # 2. Server Health Check URL
 @app.get("/health")
 async def health():
@@ -735,18 +735,11 @@ from fastapi import Request
 
 # 1. Trending status change karne ke liye API
 @app.patch("/admin/jobs/{job_id}")
-async def update_job_status(job_id: str, request: Request):
+async def update_job(job_id: str, request: Request, admin = Depends(require_admin)):
     data = await request.json()
-    is_trending = data.get("is_trending")
-    
-    result = await db.jobs.update_one(
-        {"job_id": job_id}, 
-        {"$set": {"is_trending": is_trending}}
-    )
-    
-    if result.modified_count == 0:
-        return {"success": False, "message": "Job not found or not updated"}
-    return {"success": True, "message": "Trending status updated"}
+    # Database update logic yahan hoga
+    await db.jobs.update_one({"$or": [{"job_id": job_id}, {"_id": job_id}]}, {"$set": data})
+    return {"success": True, "message": "Updated successfully"}
 
 
 # 2. User ko Premium aur Block karne ke liye API
