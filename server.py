@@ -101,8 +101,9 @@ async def extract_job_details_with_ai(url: str):
           "location": "City or state (or NA)",
           "previous_year_cutoff": "Cutoff if mentioned (or NA)",
           "railway_zone": "RRB/RRC zone (or NA)",
-          "medical_standard": "Required medical standard (or NA)",
-          "apply_online_link": "Extract the direct official 'Apply Online link' or 'Registration' URL from the Important Links section at the bottom. If not found, write NA."
+          "medical_standard": "Required medical_standard (or NA)",
+          "check_official_notice": "check_official_notice or check_short_notice"
+          "apply_online_link": "Extract the direct official 'Apply_Online_link' or 'Registration' URL from the Important Links section at the bottom. If not found, write NA."
         }}
         Text: {page_text}
         """
@@ -1062,6 +1063,7 @@ async def refresh_jobs_task() -> tuple[int, int]:
                 await db.jobs.insert_one({
                     "job_id": job_id,
                     
+                    # 🚀 BUGS FIXED: Ab AI ka nikala hua data save hoga! (Agar AI fail ho jaye toh default RSS wala use hoga)
                     "organization": ai_details.get("organization") if ai_details.get("organization") not in ["NA", None] else src["name"],
                     "post_name": ai_details.get("post_name") if ai_details.get("post_name") not in ["NA", None] else job_title,
                     "post_type": ai_details.get("post_type") if ai_details.get("post_type") not in ["NA", None] else post_type,
@@ -1073,17 +1075,16 @@ async def refresh_jobs_task() -> tuple[int, int]:
                     "pay_scale": ai_details.get("pay_scale", "NA"),
                     "salary": ai_details.get("salary", "NA"),
                     "eligibility": ai_details.get("eligibility") if ai_details.get("eligibility") not in ["NA", None] else summary,
-                    
-                    # 🔥 NAYE FIELDS YAHAN HAIN (Inke bina advanced table nahi banegi) 🔥
                     "category_vacancies": ai_details.get("category_vacancies", {}),
                     "multiple_posts": ai_details.get("multiple_posts", []),
                     "mode_of_selection": ai_details.get("mode_of_selection", []),
-                    
+
                     "location": ai_details.get("location", "India"),
                     "last_date": (date.today() + timedelta(days=30)).isoformat(),
-                    "notification_pdf": None,
+                    "check_official_notice": ai_details.get("check_official_notice",[]),
                     "apply_online_link": ai_details.get("apply_online_link") if ai_details.get("apply_link") not in ["NA", None, ""] else job_link,
                     
+                    # 🚀 FIX: AI ki Min/Max Age yahan aayegi
                     "min_age": int(ai_details.get("min_age")) if str(ai_details.get("min_age")).isdigit() else 18, 
                     "max_age": int(ai_details.get("max_age")) if str(ai_details.get("max_age")).isdigit() else 35,
                     
