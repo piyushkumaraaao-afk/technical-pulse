@@ -67,19 +67,42 @@ async def extract_job_details_with_ai(url: str):
         Extract the following job details from the text below strictly in JSON format.
         If info is not found, write "NA".
         {{
-          "post_name": "Exact post name (e.g. Clerk, Manager, Junior Engineer, SSC CGL Tier 1)",
-          "organization": "Department or Company name (e.g. SSC, RRB, ISRO, TCS, etc.)",
+          "post_name": "Main title of the recruitment (e.g. RRB Section Controller Recruitment)",
+          "organization": "Department or Company name",
           "category": "Choose exactly ONE from: ['Government', 'PSU', 'Private']",
-          "post_type": "Analyze the text and choose exactly ONE from: ['Job', 'Admit Card', 'Result', 'Upcoming Exam']",
-          "vacancies": "Total number (e.g. 500, or NA)",
-          "salary": "Salary range (e.g. 35k-50k, or NA)",
+          "post_type": "Choose exactly ONE from: ['Job', 'Admit Card', 'Result', 'Upcoming Exam']",
+          
+          "total_posts": "Extract ONLY the numerical value of total vacancies/posts (e.g. 6557).",
+          
+          "category_vacancies": {{
+             "General": "Number of posts for General/UR or NA",
+             "OBC": "Number of posts for OBC or NA",
+             "EWS": "Number of posts for EWS or NA",
+             "SC": "Number of posts for SC or NA",
+             "ST": "Number of posts for ST or NA"
+          }},
+
+          "multiple_posts": [
+             {{
+                "post_name": "Name of specific post (e.g. Junior Executive Finance)",
+                "vacancies": "Number of posts for this specific role (e.g. 36)",
+                "eligibility": "Eligibility criteria for this specific post (e.g. MBA with Finance)"
+             }}
+          ],
+
+          "mode_of_selection": ["Array of selection stages", "e.g. CBT", "Document Verification", "Medical Examination"],
+          
+          "min_age": "Minimum age limit (number only) or NA",
+          "max_age": "Maximum age limit (number only) or NA",
+          "pay scale": "Pay scale range or NA",
+          "salary": "Salary range or NA",
           "qualifications": ["B.Tech", "Diploma", "10th Pass", "12th Pass"],
           "branches": ["Computer Science", "Mechanical", "Civil", "Electrical", "Electronics"],
           "location": "City or state (or NA)",
           "previous_year_cutoff": "Cutoff if mentioned (or NA)",
-          "selection_process": "Exam stages (or NA)",
           "railway_zone": "RRB/RRC zone (or NA)",
-          "medical_standard": "Required medical standard (or NA)"
+          "medical_standard": "Required medical standard (or NA)",
+          "apply_online_link": "Extract the direct official 'Apply Online link' or 'Registration' URL from the Important Links section at the bottom. If not found, write NA."
         }}
         Text: {page_text}
         """
@@ -115,10 +138,10 @@ async def extract_job_details_with_ai(url: str):
     except Exception as e:
         print(f"AI Scraping Error for {url}:", e)
         return {
-            "post_name": "NA", "organization": "NA", "category": "Government", "post_type": "Job",
-            "vacancies": "NA", "salary": "NA", "qualifications": [], "branches": [], 
-            "location": "NA", "previous_year_cutoff": "NA", "selection_process": "NA", 
-            "railway_zone": "NA", "medical_standard": "NA"
+           "post_name": "NA", "organization": "NA", "category": "Government", "post_type": "NA",
+            "total_posts": "NA", "category_vacancies": "NA", "multiple_posts": "NA", "eligibility": "NA",
+             "mode_of_selection": "NA", "min_age": "NA", "max_age": "NA", "pay_scale": "NA",
+             "salary": "NA", "qualifications": [], "branches": [], "location": "NA", "apply_online_link": "NA"
         }
 
 # =======================
@@ -1039,7 +1062,6 @@ async def refresh_jobs_task() -> tuple[int, int]:
                 await db.jobs.insert_one({
                     "job_id": job_id,
                     
-                    # 🚀 BUGS FIXED: Ab AI ka nikala hua data save hoga! (Agar AI fail ho jaye toh default RSS wala use hoga)
                     "organization": ai_details.get("organization") if ai_details.get("organization") not in ["NA", None] else src["name"],
                     "post_name": ai_details.get("post_name") if ai_details.get("post_name") not in ["NA", None] else job_title,
                     "post_type": ai_details.get("post_type") if ai_details.get("post_type") not in ["NA", None] else post_type,
@@ -1047,26 +1069,27 @@ async def refresh_jobs_task() -> tuple[int, int]:
                     
                     "branches": detected_branches,
                     "qualifications": detected_quals, 
-                    "vacancies": ai_details.get("vacancies", "NA"),
+                    "vacancies": ai_details.get("total_posts", "NA"),
+                    "pay_scale": ai_details.get("pay_scale", "NA"),
                     "salary": ai_details.get("salary", "NA"),
-                    "eligibility": summary,
+                    "eligibility": ai_details.get("eligibility") if ai_details.get("eligibility") not in ["NA", None] else summary,
+                    
+                    # 🔥 NAYE FIELDS YAHAN HAIN (Inke bina advanced table nahi banegi) 🔥
+                    "category_vacancies": ai_details.get("category_vacancies", {}),
+                    "multiple_posts": ai_details.get("multiple_posts", []),
+                    "mode_of_selection": ai_details.get("mode_of_selection", []),
+                    
                     "location": ai_details.get("location", "India"),
                     "last_date": (date.today() + timedelta(days=30)).isoformat(),
                     "notification_pdf": None,
-                    "apply_link": job_link,
+                    "apply_online_link": ai_details.get("apply_online_link") if ai_details.get("apply_link") not in ["NA", None, ""] else job_link,
                     
-                    # ---> AI WALI AGE LIMIT <---
-                    "min_age": ai_details.get("min_age") or 18, 
-                    "max_age": ai_details.get("max_age") or 35,
+                    "min_age": int(ai_details.get("min_age")) if str(ai_details.get("min_age")).isdigit() else 18, 
+                    "max_age": int(ai_details.get("max_age")) if str(ai_details.get("max_age")).isdigit() else 35,
                     
                     "description": summary,
-                    "logo_url": None,
-                    "previous_year_cutoff": ai_details.get("previous_year_cutoff", "NA"),
-                    "selection_process": ai_details.get("selection_process", "NA"),
-                    "railway_zone": ai_details.get("railway_zone", "NA"),
-                    "medical_standard": ai_details.get("medical_standard", "NA"),
                     "is_active": True,
-                    "source": f"scraper:{src['name']}" if "sarkari" in src_name_lower or "freejob" in src_name_lower else f"rss:{src['name']}",
+                    "source": f"scraper:{src['name']}",
                     "created_at": datetime.now(timezone.utc).isoformat(),
                 })
                 added += 1
