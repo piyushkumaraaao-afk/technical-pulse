@@ -983,15 +983,43 @@ async def refresh_jobs_task() -> tuple[int, int]:
                                 })
                     else:
                         soup = BeautifulSoup(response.text, "html.parser")
-                        for link_tag in soup.find_all("a")[:20]: 
+                        
+                        # 🚨 THE FIX: Target actual job links in the main post area
+                        post_div = soup.find("div", id="post")
+                        links_to_check = post_div.find_all("a") if post_div else soup.find_all("a")
+
+                        # Humne limit 20 se badha kar 40 kar di, taaki invalid links hatne ke baad bhi data bache
+                        for link_tag in links_to_check[:40]: 
                             title = link_tag.text.strip()
                             link = link_tag.get("href") or ""
-                            if link and len(title) > 8 and ("latestjob" in link or "job" in link or "notification" in link or "apply" in link):
-                                entries_to_process.append({
-                                    "title": title,
-                                    "link": link,
-                                    "summary": f"Latest notification on {src['name']}."
-                                })
+                            
+                            # 🚨 THE FIX: Menu links aur social media ko reject karo
+                            invalid_menu_links = [
+                                "/latestjob", "/result", "/admitcard", "/syllabus", 
+                                "/answerkey", "facebook.com", "t.me", "twitter.com", 
+                                "instagram.com", "youtube.com", "apple.com", "play.google.com"
+                            ]
+                            
+                            if not link or len(title) < 10:
+                                continue
+                                
+                            # Agar link invalid list mein hai, toh usko list mein mat daalo
+                            is_invalid = any(inv in link.lower() for inv in invalid_menu_links)
+                            
+                            # Khaas taur par menu pages (jo hamesha / ya .php par end hote hain) unhe block karo
+                            if is_invalid and (link.endswith("/") or link.endswith(".php") or link.endswith(".html")):
+                                continue
+                                
+                            # Agar link aadha hai (Relative URL), toh usko poora karo
+                            if link.startswith("/"):
+                                link = f"https://www.sarkariresult.com{link}"
+
+                            # Agar yahan tak pahunch gaya, matlab link 100% kisi asali job ka hai!
+                            entries_to_process.append({
+                                "title": title,
+                                "link": link,
+                                "summary": f"Latest notification on {src['name']}."
+                            })
             else:
                 # Normal standard RSS Feed
                 feed = await asyncio.to_thread(feedparser.parse, src["url"])
