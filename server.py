@@ -67,10 +67,14 @@ async def extract_job_details_with_ai(url: str):
         Extract the following job details from the text below strictly in JSON format.
         If info is not found, write "NA".
         {{
+          "post_name": "Exact post name (e.g. Clerk, Manager, Junior Engineer, SSC CGL Tier 1)",
+          "organization": "Department or Company name (e.g. SSC, RRB, ISRO, TCS, etc.)",
+          "category": "Choose exactly ONE from: ['Government', 'PSU', 'Private']",
+          "post_type": "Analyze the text and choose exactly ONE from: ['Job', 'Admit Card', 'Result', 'Upcoming Exam']",
           "vacancies": "Total number (e.g. 500, or NA)",
           "salary": "Salary range (e.g. 35k-50k, or NA)",
-          "qualifications": ["B.Tech", "Diploma"],
-          "branches": ["Computer Science"],
+          "qualifications": ["B.Tech", "Diploma", "10th Pass", "12th Pass"],
+          "branches": ["Computer Science", "Mechanical", "Civil", "Electrical", "Electronics"],
           "location": "City or state (or NA)",
           "previous_year_cutoff": "Cutoff if mentioned (or NA)",
           "selection_process": "Exam stages (or NA)",
@@ -111,6 +115,7 @@ async def extract_job_details_with_ai(url: str):
     except Exception as e:
         print(f"AI Scraping Error for {url}:", e)
         return {
+            "post_name": "NA", "organization": "NA", "category": "Government", "post_type": "Job",
             "vacancies": "NA", "salary": "NA", "qualifications": [], "branches": [], 
             "location": "NA", "previous_year_cutoff": "NA", "selection_process": "NA", 
             "railway_zone": "NA", "medical_standard": "NA"
@@ -713,7 +718,8 @@ async def register_push(body: RegisterPushBody, user: dict = Depends(get_current
 async def create_admin_job(data: dict): # Ya jo bhi aapka Pydantic schema ho
     
     # 🚀 STEP 1: Frontend se aa raha post_type get karein (Agar na aaye toh 'Job' default set kardein)
-    post_type = data.get("post_type", "Job") 
+    post_type = data.get("post_type", "Job")
+    ai_details = await extract_job_details_with_ai(job_url)
 
     job_id = f"job_{uuid.uuid4().hex[:12]}"
 
@@ -1032,10 +1038,12 @@ async def refresh_jobs_task() -> tuple[int, int]:
                 # Database Entry
                 await db.jobs.insert_one({
                     "job_id": job_id,
-                    "organization": src["name"],
-                    "post_name": job_title,
-                    "post_type": post_type,  # ---> APP MEIN FILTER KARNE KE LIYE <---
-                    "category": src.get("default_category", "Government"),
+                    
+                    # 🚀 BUGS FIXED: Ab AI ka nikala hua data save hoga! (Agar AI fail ho jaye toh default RSS wala use hoga)
+                    "organization": ai_details.get("organization") if ai_details.get("organization") not in ["NA", None] else src["name"],
+                    "post_name": ai_details.get("post_name") if ai_details.get("post_name") not in ["NA", None] else job_title,
+                    "post_type": ai_details.get("post_type") if ai_details.get("post_type") not in ["NA", None] else post_type,
+                    "category": ai_details.get("category") if ai_details.get("category") not in ["NA", None] else src.get("default_category", "Government"),
                     
                     "branches": detected_branches,
                     "qualifications": detected_quals, 
@@ -1047,7 +1055,7 @@ async def refresh_jobs_task() -> tuple[int, int]:
                     "notification_pdf": None,
                     "apply_link": job_link,
                     
-                    # ---> AI WALI AGE LIMIT YAHAN UPDATE KI HAI <---
+                    # ---> AI WALI AGE LIMIT <---
                     "min_age": ai_details.get("min_age") or 18, 
                     "max_age": ai_details.get("max_age") or 35,
                     
