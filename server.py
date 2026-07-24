@@ -748,26 +748,27 @@ async def create_admin_job(data: dict): # Ya jo bhi aapka Pydantic schema ho
 
 
 # 1. Trending status change karne ke liye API
-@api.patch("/admin/users/{user_id}")
-async def update_user_status(user_id: str, request: Request, admin: dict = Depends(require_admin)):
+# 🚀 NAYA: Admin Jobs Status (Trending/Active) Update karne ke liye API
+@api.patch("/admin/jobs/{job_id}")
+async def update_job_status(job_id: str, request: Request, admin: dict = Depends(require_admin)):
     data = await request.json()
     
     update_data = {}
-    if "is_premium" in data:
-        update_data["is_premium"] = data["is_premium"]
-    if "is_blocked" in data:
-        update_data["is_blocked"] = data["is_blocked"]
+    if "is_trending" in data:
+        update_data["is_trending"] = data["is_trending"]
+    if "is_active" in data:
+        update_data["is_active"] = data["is_active"]
         
-    query = {"$or": [{"user_id": user_id}]}
-    if ObjectId.is_valid(user_id):
-        query["$or"].append({"_id": ObjectId(user_id)})
+    query = {"$or": [{"job_id": job_id}]}
+    if ObjectId.is_valid(job_id):
+        query["$or"].append({"_id": ObjectId(job_id)})
 
-    result = await db.users.update_one(query, {"$set": update_data})
+    result = await db.jobs.update_one(query, {"$set": update_data})
     
     if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise HTTPException(status_code=404, detail="Job not found")
         
-    return {"success": True, "message": "User updated successfully"}
+    return {"success": True, "message": "Job status updated successfully"}
 
 
 # 2. User ko Premium aur Block karne ke liye API
