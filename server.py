@@ -54,25 +54,39 @@ GROQ_API_KEY = "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"
 
 import asyncio
 
+import asyncio
+import httpx
+import json
+from bs4 import BeautifulSoup
+
 async def extract_job_details_with_ai(url: str):
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.get(url, follow_redirects=True)
             
         soup = BeautifulSoup(response.text, 'html.parser')
-        # Token limit bachane ke liye 4000 ki jagah 2500 characters kar diye
-        page_text = soup.get_text(separator=' ', strip=True)[:2500] 
+        
+        # 🚀 SMART TRICK 1: HTML tags hatane se pehle, saare Links ko text me badal do
+        # Isse AI ko 'Apply Online' aur 'Notification' ke asali links dikh jayenge
+        for a in soup.find_all('a', href=True):
+            link_text = a.get_text(strip=True)
+            link_url = a['href']
+            a.replace_with(f" {link_text} [Link: {link_url}] ")
 
+        # Token limit thodi badha di taaki links fit ho jayein (2500 -> 3500 characters)
+        page_text = soup.get_text(separator=' ', strip=True)[:3500] 
+
+        # 🚀 SMART TRICK 2: Synonyms add kiye aur Comma (,) wali JSON error fix ki
         prompt = f"""
         Extract the following job details from the text below strictly in JSON format.
-        If info is not found, write "NA".
+        Pay close attention to synonyms. If info is genuinely not found, write "NA".
         {{
           "post_name": "Main title of the recruitment (e.g. RRB Section Controller Recruitment)",
           "organization": "Department or Company name",
           "category": "Choose exactly ONE from: ['Government', 'PSU', 'Private']",
           "post_type": "Choose exactly ONE from: ['Job', 'Admit Card', 'Result', 'Upcoming Exam']",
           
-          "total_posts": "Extract ONLY the numerical value of total vacancies/posts (e.g. 6557).",
+          "total_posts": "Extract ONLY the numerical value of total vacancies/posts/Total Vacancy (e.g. 6557).",
           
           "category_vacancies": {{
              "General": "Number of posts for General/UR or NA",
@@ -94,7 +108,7 @@ async def extract_job_details_with_ai(url: str):
           
           "min_age": "Minimum age limit (number only) or NA",
           "max_age": "Maximum age limit (number only) or NA",
-          "pay scale": "Pay scale range or NA",
+          "pay_scale": "Pay scale range or NA",
           "salary": "Salary range or NA",
           "qualifications": ["B.Tech", "Diploma", "10th Pass", "12th Pass"],
           "branches": ["Computer Science", "Mechanical", "Civil", "Electrical", "Electronics"],
@@ -102,8 +116,8 @@ async def extract_job_details_with_ai(url: str):
           "previous_year_cutoff": "Cutoff if mentioned (or NA)",
           "railway_zone": "RRB/RRC zone (or NA)",
           "medical_standard": "Required medical_standard (or NA)",
-          "check_official_notice": "check_official_notice or check_short_notice"
-          "apply_online_link": "Extract the direct official 'Apply_Online_link' or 'Registration' URL from the Important Links section at the bottom. If not found, write NA."
+          "check_official_notice": "Look for links labeled 'Download Notification' or 'Official Notice'. Extract URL from [Link: ...] bracket.",
+          "apply_online_link": "Look for 'Apply Online',Apply Online Link 'Registration', or 'Login'. Extract the URL from inside the [Link: ...] bracket. If not found, write NA."
         }}
         Text: {page_text}
         """
@@ -113,13 +127,13 @@ async def extract_job_details_with_ai(url: str):
         
         groq_url = "https://api.groq.com/openai/v1/chat/completions"
         headers = {
-            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Authorization": f"Bearer {GROQ_API_KEY}", # Ensure GROQ_API_KEY is defined in your environment
             "Content-Type": "application/json"
         }
         payload = {
             "model": "llama-3.1-8b-instant",
             "messages": [
-                {"role": "system", "content": "You are a JSON data extractor. Always return valid JSON."},
+                {"role": "system", "content": "You are a precise JSON data extractor. Understand synonyms carefully. Always return valid JSON only."},
                 {"role": "user", "content": prompt}
             ],
             "response_format": {"type": "json_object"}
@@ -138,11 +152,13 @@ async def extract_job_details_with_ai(url: str):
         
     except Exception as e:
         print(f"AI Scraping Error for {url}:", e)
+        # 🚀 SMART TRICK 3: App crash se bachne ke liye arrays/objects ko "NA" ki jagah [] aur {} diya gaya hai
         return {
            "post_name": "NA", "organization": "NA", "category": "Government", "post_type": "NA",
-            "total_posts": "NA", "category_vacancies": "NA", "multiple_posts": "NA", "eligibility": "NA",
-             "mode_of_selection": "NA", "min_age": "NA", "max_age": "NA", "pay_scale": "NA",
-             "salary": "NA", "qualifications": [], "branches": [], "location": "NA", "apply_online_link": "NA"
+            "total_posts": "NA", "category_vacancies": {}, "multiple_posts": [], "eligibility": "NA",
+             "mode_of_selection": [], "min_age": "NA", "max_age": "NA", "pay_scale": "NA",
+             "salary": "NA", "qualifications": [], "branches": [], "location": "NA", "apply_online_link": "NA",
+             "check_official_notice": "NA", "previous_year_cutoff": "NA", "railway_zone": "NA", "medical_standard": "NA"
         }
 
 # =======================
@@ -993,11 +1009,12 @@ async def refresh_jobs_task() -> tuple[int, int]:
                             title = link_tag.text.strip()
                             link = link_tag.get("href") or ""
                             
-                            # 🚨 THE FIX: Menu links aur social media ko reject karo
+                            # 🚨 THE FIX: Faltu pages ko bhi reject karo
                             invalid_menu_links = [
                                 "/latestjob", "/result", "/admitcard", "/syllabus", 
                                 "/answerkey", "facebook.com", "t.me", "twitter.com", 
-                                "instagram.com", "youtube.com", "apple.com", "play.google.com"
+                                "instagram.com", "youtube.com", "apple.com", "play.google.com",
+                                "terms-and-conditions", "privacy-policy", "contact-us", "about-us" # <-- Yeh Naye words add kiye hain
                             ]
                             
                             if not link or len(title) < 10:
@@ -1109,8 +1126,9 @@ async def refresh_jobs_task() -> tuple[int, int]:
 
                     "location": ai_details.get("location", "India"),
                     "last_date": (date.today() + timedelta(days=30)).isoformat(),
-                    "check_official_notice": ai_details.get("check_official_notice",[]),
-                    "apply_online_link": ai_details.get("apply_online_link") if ai_details.get("apply_link") not in ["NA", None, ""] else job_link,
+                    # Insert block ke andar apply link wale hisse ke aas pass:
+                    "notification_pdf": ai_details.get("notification_pdf") if ai_details.get("notification_pdf") not in ["NA", None, ""] else None,
+                    "apply_link": ai_details.get("apply_link") if ai_details.get("apply_link") not in ["NA", None, ""] else job_link,
                     
                     # 🚀 FIX: AI ki Min/Max Age yahan aayegi
                     "min_age": int(ai_details.get("min_age")) if str(ai_details.get("min_age")).isdigit() else 18, 
