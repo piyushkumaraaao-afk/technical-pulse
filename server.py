@@ -34,6 +34,40 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
 
+def canonical_url(url: str) -> str:
+    """Duplicate URL check ko bulletproof banata hai (Removes UTM parameters)"""
+    parts = urlsplit(url.strip())
+    query = [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True)
+             if not key.lower().startswith(("utm_", "fbclid", "gclid"))]
+    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/") or "/",
+                       urlencode(query, doseq=True), ""))
+
+def as_int_or_none(value) -> int | None:
+    """'18 Years' me se sirf '18' nikalega, database crash nahi hoga"""
+    match = re.search(r"\d+", str(value))
+    return int(match.group()) if match else None
+
+def valid_iso_date(value) -> str | None:
+    """Fake date format detect karke MongoDB ko clean date dega"""
+    try:
+        return date.fromisoformat(str(value)[:10]).isoformat()
+    except (TypeError, ValueError):
+        return None
+
+def first_json_object(model_text: str) -> dict:
+    """AI ke kachre se sirf JSON nikalega"""
+    model_text = model_text.strip()
+    if model_text.startswith("```"):
+        model_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", model_text, flags=re.I)
+    try:
+        parsed = json.loads(model_text)
+    except json.JSONDecodeError:
+        start, end = model_text.find("{"), model_text.rfind("}")
+        if start < 0 or end <= start:
+            raise
+        parsed = json.loads(model_text[start:end + 1])
+    return parsed
+
 # Config
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
 DB_NAME = os.environ.get("DB_NAME", "careerpulse")
@@ -60,54 +94,46 @@ GROQ_API_KEY = "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"
 
 async def extract_job_details_with_ai(url: str):
     try:
-        # 🚀 CRAWL4AI MAGIC: Yeh website ka kachra saaf karke perfect Markdown bana dega
-        # Isse tables (ITI/Diploma/Degree) aur links tootenge nahi!
+        # 🚀 CRAWL4AI MAGIC for Tables + BS4 for Accurate Links
         async with AsyncWebCrawler(verbose=True) as crawler:
             result = await crawler.arun(url=url, bypass_cache=True)
-            
-            # Crawl4AI gives us clean markdown, which LLMs love
             page_text = result.markdown
             
-        # Token limit safe rakhne ke liye 4000 characters (Markdown me data dense hota hai)
         if len(page_text) > 4000:
             page_text = page_text[:4000]
 
-        # 🚀 SMART PROMPT: Aapka purana format ekdum same hai
+        # Fetch important links manually to feed to AI
+        browser_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        async with httpx.AsyncClient(timeout=15.0, headers=browser_headers) as client:
+            response = await client.get(url, follow_redirects=True)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            important_links = []
+            for a in soup.find_all('a', href=True):
+                link_text = a.get_text(strip=True)
+                link_url = canonical_url(urljoin(url, a['href'])) # 🚀 Codex Smart URL
+                if any(k in link_text.lower() for k in ['apply', 'register', 'login', 'notification', 'pdf', 'admit card', 'result']):
+                    if not link_url.startswith(("http", "https")): continue 
+                    important_links.append(f"{link_text} -> {link_url}")
+            
+        links_text = "\n".join(important_links[:15])
+
         prompt = f"""
-        Extract job details strictly in JSON format. Use the clean MARKDOWN content provided below.
-        Pay critical attention to Markdown tables for ITI/Diploma/Degree trade vacancies, Age Limits, and Mode of Selection.
+        Extract job details strictly in JSON format. Use the clean MARKDOWN and LINKS provided below.
+        Pay critical attention to tables for ITI/Diploma/Degree trade vacancies, Age Limits, and Mode of Selection.
         If info is genuinely not found, write "NA".
         
         {{
-          "post_name": "Main title of the recruitment (e.g. Railway RRB Technician, ISRO Assistant)",
-          "organization": "Department or Company name (e.g. RRB, ISRO, UPPSC)",
+          "post_name": "Main title of the recruitment",
+          "organization": "Department or Company name",
           "category": "Choose exactly ONE from: ['Government', 'PSU', 'Private']",
           "post_type": "Choose exactly ONE from: ['Job', 'Admit Card', 'Result', 'Scholarship', 'Apprenticeship', 'Internship', 'Upcoming Exam', 'IGNORE']. If admission/counseling, output 'IGNORE'.",
-          
           "total_posts": "Extract ONLY the numerical value of total vacancies.",
-          
-          "category_vacancies": {{
-             "General": "Number of posts for General/UR or NA",
-             "OBC": "Number of posts for OBC or NA",
-             "EWS": "Number of posts for EWS or NA",
-             "SC": "Number of posts for SC or NA",
-             "ST": "Number of posts for ST or NA"
-          }},
-
-          "state_wise_vacancies": [
-             {{ "state_name": "Name of the state", "vacancies": "Number of posts" }}
-          ],
-
+          "category_vacancies": {{ "General": "NA", "OBC": "NA", "EWS": "NA", "SC": "NA", "ST": "NA" }},
+          "state_wise_vacancies": [ {{ "state_name": "Name of the state", "vacancies": "Number of posts" }} ],
           "multiple_posts": [
-             {{
-                "post_name": "Name of specific post OR Trade Name (e.g. Assistant/UDC, Fitter, Civil, Electrician, COPA)",
-                "vacancies": "Number of posts for this specific role/trade (Combine ITI/Diploma/Degree columns if necessary)",
-                "eligibility": "Eligibility criteria for this specific post/trade"
-             }}
+             {{ "post_name": "Name of specific post OR Trade Name (Combine ITI/Diploma/Degree columns if necessary)", "vacancies": "Number of posts", "eligibility": "Eligibility criteria" }}
           ],
-
           "mode_of_selection": ["Array of selection stages", "e.g. CBT", "Document Verification", "Medical Examination"],
-          
           "min_age": "Minimum age limit (number only) or NA",
           "max_age": "Maximum age limit (number only) or NA",
           "pay_scale": "Pay scale range or NA",
@@ -115,12 +141,46 @@ async def extract_job_details_with_ai(url: str):
           "qualifications": ["B.Tech", "Diploma", "10th Pass", "12th Pass", "ITI", "Graduate", "PG"],
           "branches": ["Computer Science", "Mechanical", "Civil", "Electrical", "Electronics", "Fitter", "Welder", "Electrician"],
           "location": "City or state (or NA)",
-          "previous_year_cutoff": "Cutoff if mentioned (or NA)",
-          "railway_zone": "RRB/RRC zone (or NA)",
-          "medical_standard": "Required medical_standard (or NA)",
-          "check_official_notice": "Extract URL for 'Official Notification' or 'Download Notice' from text.",
-          "apply_online_link": "Extract URL for 'Apply Online', 'Registration' from text. If not found, write NA."
+          "last_date": "YYYY-MM-DD if unambiguous else NA",
+          "check_official_notice": "Extract URL for 'Official Notification' or 'Download Notice' from LINKS.",
+          "apply_online_link": "Extract URL for 'Apply Online', 'Registration' from LINKS. If not found, write NA."
         }}
+        
+        --- MARKDOWN TEXT ---
+        {page_text}
+        --- LINKS ---
+        {links_text}
+        """
+        
+        await asyncio.sleep(4)
+        
+        groq_url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+        payload = {
+            "model": "llama-3.1-8b-instant",
+            "messages": [
+                {"role": "system", "content": "You are a precise JSON data extractor. Always return valid JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            "response_format": {"type": "json_object"}
+        }
+        
+        async with httpx.AsyncClient(timeout=25.0) as ai_client:
+            ai_resp = await ai_client.post(groq_url, headers=headers, json=payload)
+            ai_resp.raise_for_status()
+            
+            # 🚀 CODEX BULLETPROOF PARSING
+            return first_json_object(ai_resp.json()['choices'][0]['message']['content'])
+            
+    except Exception as e:
+        print(f"AI Scraping Error for {url}:", e)
+        return {
+           "post_name": "NA", "organization": "NA", "category": "Government", "post_type": "NA",
+            "total_posts": "NA", "category_vacancies": {}, "state_wise_vacancies": [], "multiple_posts": [], "eligibility": "NA",
+             "mode_of_selection": [], "min_age": "NA", "max_age": "NA", "pay_scale": "NA", "last_date": "NA",
+             "salary": "NA", "qualifications": [], "branches": [], "location": "NA", "apply_online_link": "NA",
+             "check_official_notice": "NA"
+        }
         
         --- DATA TO ANALYZE (CLEAN MARKDOWN) ---
         {page_text}
@@ -958,16 +1018,19 @@ async def get_admin_feedback(admin: dict = Depends(require_admin)):
 # Level 2 AI Scraper Logic Fix
 # =======================
 # Duplicate check
-                existing = await db.jobs.find_one({"apply_link": job_link}, {"_id": 0, "job_id": 1})
+                job_link = canonical_url(entry["link"])
+                existing = await db.jobs.find_one(
+                    {"$or": [{"source_url": job_link}, {"apply_link": job_link}]}, 
+                    {"_id": 1}
+                )
                 if existing:
                     continue
                 
-                print(f"Deep scraping [{post_type}]: {job_title}")
+                print(f"Deep scraping [{title_type}]: {title}")
                 ai_details = await extract_job_details_with_ai(job_link)
                 
-                # 🚀 SMART TRICK: Ignore Admissions, Counseling, and non-job links
                 if ai_details.get("post_type") == "IGNORE":
-                    print(f"🚫 Ignored Admission/Irrelevant post: {job_title}")
+                    print(f"🚫 Ignored Admission/Irrelevant post: {title}")
                     continue
                 
                 job_id = f"job_{uuid.uuid4().hex[:12]}"
@@ -993,14 +1056,16 @@ async def get_admin_feedback(admin: dict = Depends(require_admin)):
                         if any(word in combined_text for word in ["computer", "it ", "software"]): detected_branches.append("Computer Science")
                         
                     if not detected_quals: detected_quals = ["Not Specified"]
+                    
+                extracted_apply = ai_details.get("apply_online_link", "NA")
+                action_link = extracted_apply if extracted_apply != "NA" else job_link    
 
                 await db.jobs.insert_one({
                     "job_id": job_id,
-                    
-                    # 🚀 HYBRID FALLBACKS: Agar AI blank deta hai, toh purana logic fail nahi hone dega
+                    "source_url": job_link,
                     "organization": ai_details.get("organization") if ai_details.get("organization") not in ["NA", None, ""] else src["name"],
-                    "post_name": ai_details.get("post_name") if ai_details.get("post_name") not in ["NA", None, ""] else job_title,
-                    "post_type": ai_details.get("post_type") if ai_details.get("post_type") not in ["NA", None, ""] else post_type,
+                    "post_name": ai_details.get("post_name") if ai_details.get("post_name") not in ["NA", None, ""] else title,
+                    "post_type": ai_details.get("post_type") if ai_details.get("post_type") not in ["NA", None, ""] else title_type,
                     "category": ai_details.get("category") if ai_details.get("category") not in ["NA", None, ""] else src.get("default_category", "Government"),
                     
                     "branches": detected_branches,
@@ -1016,13 +1081,16 @@ async def get_admin_feedback(admin: dict = Depends(require_admin)):
                     "mode_of_selection": ai_details.get("mode_of_selection", []),
 
                     "location": ai_details.get("location", "India"),
-                    "last_date": (date.today() + timedelta(days=30)).isoformat(),
+                    
+                    # 🚀 CODEX SMART DATE CHECK
+                    "last_date": valid_iso_date(ai_details.get("last_date")) or (date.today() + timedelta(days=30)).isoformat(),
                     
                     "notification_pdf": ai_details.get("check_official_notice") if ai_details.get("check_official_notice") not in ["NA", None, ""] else None,
-                    "apply_link": ai_details.get("apply_online_link") if ai_details.get("apply_online_link") not in ["NA", None, ""] else job_link,
+                    "apply_link": action_link,
                     
-                    "min_age": int(ai_details.get("min_age")) if str(ai_details.get("min_age")).isdigit() else 18, 
-                    "max_age": int(ai_details.get("max_age")) if str(ai_details.get("max_age")).isdigit() else 35,
+                    # 🚀 CODEX SMART INT EXTRACTOR
+                    "min_age": as_int_or_none(ai_details.get("min_age")) or 18, 
+                    "max_age": as_int_or_none(ai_details.get("max_age")) or 35,
                     
                     "description": summary,
                     "is_active": True,
