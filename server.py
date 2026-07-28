@@ -915,11 +915,11 @@ async def admin_delete_rss(src_id: str, admin: dict = Depends(require_admin)):
 
 
 @api.post("/admin/refresh-jobs")
-async def admin_refresh_jobs(background_tasks: BackgroundTasks, admin: dict = Depends(require_admin)):
-    # 🚀 524 ERROR JAD SE KHATAM: Ab scraping background mein hogi!
-    # API turant response de dega, aur scraping aaram se peeche chalti rahegi.
-    background_tasks.add_task(refresh_jobs_task)
-    return {"message": "Job refresh started in background! 524 error will never happen again. Check jobs after a few minutes."}
+async def admin_refresh_jobs(admin: dict = Depends(require_admin)):
+    # 🚀 FIX: Background task hata diya hai. 
+    # Ab yeh pehle ki tarah pura wait karega aur frontend ko exact Added/Removed jobs batayega.
+    added, removed = await refresh_jobs_task()
+    return {"added": added, "removed": removed}
 
 # =======================
 # Feedback & User Management 
