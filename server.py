@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone, date
 from typing import List, Optional, Literal
 from fastapi.security import HTTPBearer
 from fastapi import Query
+from fastapi import BackgroundTasks
 
 import jwt
 import bcrypt
@@ -61,7 +62,6 @@ from bs4 import BeautifulSoup
 
 async def extract_job_details_with_ai(url: str):
     try:
-        # 🚀 SMART TRICK 1: Doosre RSS Sources se block na hone ke liye Browser Headers lagaye
         browser_headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
@@ -72,36 +72,32 @@ async def extract_job_details_with_ai(url: str):
             
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # 🚀 SMART TRICK 2: Apply links na milne ki problem solve!
-        # Page se saare kaam ke links nikal kar ek list banayenge
         important_links = []
         for a in soup.find_all('a', href=True):
             link_text = a.get_text(strip=True)
             link_url = a['href']
             text_lower = link_text.lower()
-            # Sirf kaam ke links filter karenge taaki AI confuse na ho
             if any(k in text_lower for k in ['apply', 'register', 'login', 'notification', 'notice', 'pdf', 'click here', 'admit card', 'result', 'website']):
-                # Agar link aadha hai, toh ignore na ho
                 if link_url.startswith("/"): continue 
                 important_links.append(f"{link_text} -> {link_url}")
 
         page_text = soup.get_text(separator=' ', strip=True)[:3500] 
         
-        # Links ko text ke ekdum aakhiri mein chipka do
         if important_links:
             page_text += "\n\n--- IMPORTANT LINKS ---\n" + "\n".join(important_links[:15])
 
-        # 🚀 SMART TRICK 3: Admissions ko 'IGNORE' karna aur Trade-wise (ITI/Diploma) list banana
+        # 🚀 SMART TRICK: Ab AI State-wise, Trade-wise, Category-wise har table padhega!
         prompt = f"""
         Extract the following job details from the text below strictly in JSON format.
-        Pay close attention to synonyms. If info is genuinely not found, write "NA".
+        Pay close attention to tables. There might be State + Posts, Trade + Posts, or Category + Posts. 
+        If info is genuinely not found, write "NA".
         {{
-          "post_name": "Main title of the recruitment (e.g. RRB Section Controller Recruitment)",
-          "organization": "Department or Company name",
+          "post_name": "Main title of the recruitment (e.g. Junior Engineer, Clerk, Safai Karmchari, Nursing Officer, Manager, Assistant)",
+          "organization": "Department or Company name (e.g. RRB, ISRO, UPPSC, AIIMS)",
           "category": "Choose exactly ONE from: ['Government', 'PSU', 'Private']",
-          "post_type": "Choose exactly ONE from: ['Job', 'Admit Card', 'Result', 'Scholarship', 'Upcoming Exam', 'IGNORE']. STRICT RULE: If the text is about School/College Admissions, Counseling, or Entrance Exams, you MUST output 'IGNORE'.",
+          "post_type": "Choose exactly ONE from: ['Job', 'Admit Card', 'Result', 'Scholarship', 'Apprenticeship', 'Internship', 'Upcoming Exam', 'IGNORE']. STRICT RULE: If about School/College Admissions, Counseling, output 'IGNORE'.",
           
-          "total_posts": "Extract ONLY the numerical value of total vacancies/posts/Total Vacancy (e.g. 6557).",
+          "total_posts": "Extract ONLY the numerical value of total vacancies (e.g. 6557).",
           
           "category_vacancies": {{
              "General": "Number of posts for General/UR or NA",
@@ -111,12 +107,18 @@ async def extract_job_details_with_ai(url: str):
              "ST": "Number of posts for ST or NA"
           }},
 
+          "state_wise_vacancies": [
+             {{
+                "state_name": "Name of the state/region",
+                "vacancies": "Number of posts for this state"
+             }}
+          ],
+
           "multiple_posts": [
              {{
-                "post_name": "Name of specific post (e.g. Junior Executive Finance)",
-                "vacancies": "Number of posts for this specific role (e.g. 36)",
-                "trade name": "Name of trade or Name of branch (e.g. Civil, Fitter, COPA, Electrical, Electrician)",
-                "eligibility": "Eligibility criteria for this specific post (e.g. MBA with Finance)"
+                "post_name": "Name of specific post OR Trade/Branch name (e.g. Civil, Fitter, Clerk)",
+                "vacancies": "Number of posts for this specific role/trade",
+                "eligibility": "Eligibility criteria for this specific post/trade/category"
              }}
           ],
 
@@ -133,23 +135,22 @@ async def extract_job_details_with_ai(url: str):
           "railway_zone": "RRB/RRC zone (or NA)",
           "medical_standard": "Required medical_standard (or NA)",
           "check_official_notice": "Look for links labeled 'Download Notification' or 'Official Notice'. Extract URL from [Link: ...] bracket.",
-          "apply_online_link": "Look for 'Apply Online',Apply Online Link 'Registration', or 'Login'. Extract the URL from inside the [Link: ...] bracket. If not found, write NA."
+          "apply_online_link": "Look for 'Apply Online', 'Registration', or 'Login'. Extract the URL from inside the [Link: ...] bracket. If not found, write NA."
         }}
         Text: {page_text}
         """
         
-        # Groq API ko overload hone se bachane ke liye 4 second ka pause
         await asyncio.sleep(4)
         
         groq_url = "https://api.groq.com/openai/v1/chat/completions"
         headers = {
-            "Authorization": f"Bearer {GROQ_API_KEY}", # Ensure GROQ_API_KEY is defined in your environment
+            "Authorization": f"Bearer {GROQ_API_KEY}",
             "Content-Type": "application/json"
         }
         payload = {
             "model": "llama-3.1-8b-instant",
             "messages": [
-                {"role": "system", "content": "You are a precise JSON data extractor. Understand synonyms carefully. Always return valid JSON only."},
+                {"role": "system", "content": "You are a precise JSON data extractor. Understand synonyms carefully. Group State, Trade, Category, Vacancy, and Eligibility together properly. Always return valid JSON only."},
                 {"role": "user", "content": prompt}
             ],
             "response_format": {"type": "json_object"}
@@ -168,10 +169,9 @@ async def extract_job_details_with_ai(url: str):
         
     except Exception as e:
         print(f"AI Scraping Error for {url}:", e)
-        # 🚀 SMART TRICK 3: App crash se bachne ke liye arrays/objects ko "NA" ki jagah [] aur {} diya gaya hai
         return {
            "post_name": "NA", "organization": "NA", "category": "Government", "post_type": "NA",
-            "total_posts": "NA", "category_vacancies": {}, "multiple_posts": [], "eligibility": "NA",
+            "total_posts": "NA", "category_vacancies": {}, "state_wise_vacancies": [], "multiple_posts": [], "eligibility": "NA",
              "mode_of_selection": [], "min_age": "NA", "max_age": "NA", "pay_scale": "NA",
              "salary": "NA", "qualifications": [], "branches": [], "location": "NA", "apply_online_link": "NA",
              "check_official_notice": "NA", "previous_year_cutoff": "NA", "railway_zone": "NA", "medical_standard": "NA"
@@ -937,9 +937,11 @@ async def admin_delete_rss(src_id: str, admin: dict = Depends(require_admin)):
 
 
 @api.post("/admin/refresh-jobs")
-async def admin_refresh_jobs(admin: dict = Depends(require_admin)):
-    added, removed = await refresh_jobs_task()
-    return {"added": added, "removed": removed}
+async def admin_refresh_jobs(background_tasks: BackgroundTasks, admin: dict = Depends(require_admin)):
+    # 🚀 524 ERROR JAD SE KHATAM: Ab scraping background mein hogi!
+    # API turant response de dega, aur scraping aaram se peeche chalti rahegi.
+    background_tasks.add_task(refresh_jobs_task)
+    return {"message": "Job refresh started in background! 524 error will never happen again. Check jobs after a few minutes."}
 
 # =======================
 # Feedback & User Management 
@@ -1145,14 +1147,15 @@ async def refresh_jobs_task() -> tuple[int, int]:
                     "pay_scale": ai_details.get("pay_scale", "NA"),
                     "salary": ai_details.get("salary", "NA"),
                     "eligibility": ai_details.get("eligibility") if ai_details.get("eligibility") not in ["NA", None] else summary,
+                    
                     "category_vacancies": ai_details.get("category_vacancies", {}),
                     "multiple_posts": ai_details.get("multiple_posts", []),
+                    "state_wise_vacancies": ai_details.get("state_wise_vacancies", []), # 🚀 NAYA STATE WAISE VACANCY ADDED
                     "mode_of_selection": ai_details.get("mode_of_selection", []),
 
                     "location": ai_details.get("location", "India"),
                     "last_date": (date.today() + timedelta(days=30)).isoformat(),
                     
-                    # 🚀 BUGS FIXED: Yahan names match kar diye gaye hain
                     "notification_pdf": ai_details.get("check_official_notice") if ai_details.get("check_official_notice") not in ["NA", None, ""] else None,
                     "apply_link": ai_details.get("apply_online_link") if ai_details.get("apply_online_link") not in ["NA", None, ""] else job_link,
                     
