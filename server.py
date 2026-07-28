@@ -17,6 +17,7 @@ from io import BytesIO
 import random
 import re
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
+from crawl4ai import AsyncWebCrawler
 
 
 import jwt
@@ -57,271 +58,110 @@ _push_client = None
 # ==========================================
 GROQ_API_KEY = "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"
 
-"""First snippet replacement: Groq-based detail extractor only.
-
-This file has no database or RSS-refresh code. It exports
-`extract_job_details_with_ai(url)` for the refresh task to call.
-"""
-
-import asyncio
-from io import BytesIO
-import json
-import os
-import random
-import re
-from typing import Any
-from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
-
-import httpx
-from bs4 import BeautifulSoup
-
-try:
-    from pypdf import PdfReader
-except ImportError:  # PDF enrichment is optional.
-    PdfReader = None
-
-
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
-GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama-3.1-8b-instant"
-ALLOWED_POST_TYPES = {
-    "Job", "Admit Card", "Result", "Scholarship", "Apprenticeship",
-    "Internship", "Upcoming Exam", "IGNORE",
-}
-DEFAULT_DETAILS: dict[str, Any] = {
-    "post_name": "NA", "organization": "NA", "category": "Government", "post_type": "Job",
-    "total_posts": "NA",
-    "category_vacancies": {"General": "NA", "OBC": "NA", "EWS": "NA", "SC": "NA", "ST": "NA"},
-    "state_wise_vacancies": [], "multiple_posts": [], "eligibility": "NA",
-    "mode_of_selection": [], "min_age": "NA", "max_age": "NA", "pay_scale": "NA",
-    "salary": "NA", "qualifications": [], "branches": [], "location": "NA", "last_date": "NA",
-    "check_official_notice": "NA", "apply_online_link": "NA",
-}
-BROWSER_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-IN,en;q=0.9,hi;q=0.8",
-}
-
-
-def canonical_url(url: str) -> str:
-    """Use a stable URL for source links and duplicate checks."""
-    parts = urlsplit(url.strip())
-    query = [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True)
-             if not key.lower().startswith(("utm_", "fbclid", "gclid"))]
-    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/") or "/",
-                       urlencode(query, doseq=True), ""))
-
-
-def text_limit(value: str, maximum: int) -> str:
-    return re.sub(r"\s+", " ", value).strip()[:maximum]
-
-
-def as_list(value: Any) -> list[Any]:
-    return value if isinstance(value, list) else []
-
-
-def as_dict(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
-def clean_string(value: Any, fallback: str = "NA") -> str:
-    return str(value).strip() if value is not None and str(value).strip() else fallback
-
-
-def normalize_details(raw: Any) -> dict[str, Any]:
-    """Keep a partial or malformed model response safe for MongoDB."""
-    details = DEFAULT_DETAILS | as_dict(raw)
-    details["post_type"] = clean_string(details.get("post_type"))
-    if details["post_type"] not in ALLOWED_POST_TYPES:
-        details["post_type"] = "Job"
-    details["category"] = clean_string(details.get("category"), "Government")
-    if details["category"] not in {"Government", "PSU", "Private"}:
-        details["category"] = "Government"
-    for key in (
-        "post_name", "organization", "total_posts", "eligibility", "min_age", "max_age",
-        "pay_scale", "salary", "location", "last_date", "check_official_notice", "apply_online_link",
-    ):
-        details[key] = clean_string(details.get(key))
-    details["category_vacancies"] = DEFAULT_DETAILS["category_vacancies"] | as_dict(details.get("category_vacancies"))
-    for key in ("state_wise_vacancies", "multiple_posts", "mode_of_selection", "qualifications", "branches"):
-        details[key] = as_list(details.get(key))
-    return details
-
-
-def first_json_object(model_text: str) -> dict[str, Any]:
-    """Handle the rare case where a model wraps otherwise-valid JSON in a fence."""
-    model_text = model_text.strip()
-    if model_text.startswith("```"):
-        model_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", model_text, flags=re.I)
+async def extract_job_details_with_ai(url: str):
     try:
-        parsed = json.loads(model_text)
-    except json.JSONDecodeError:
-        start, end = model_text.find("{"), model_text.rfind("}")
-        if start < 0 or end <= start:
-            raise
-        parsed = json.loads(model_text[start:end + 1])
-    if not isinstance(parsed, dict):
-        raise ValueError("Groq returned a non-object JSON value")
-    return parsed
+        # 🚀 CRAWL4AI MAGIC: Yeh website ka kachra saaf karke perfect Markdown bana dega
+        # Isse tables (ITI/Diploma/Degree) aur links tootenge nahi!
+        async with AsyncWebCrawler(verbose=True) as crawler:
+            result = await crawler.arun(url=url, bypass_cache=True)
+            
+            # Crawl4AI gives us clean markdown, which LLMs love
+            page_text = result.markdown
+            
+        # Token limit safe rakhne ke liye 4000 characters (Markdown me data dense hota hai)
+        if len(page_text) > 4000:
+            page_text = page_text[:4000]
 
+        # 🚀 SMART PROMPT: Aapka purana format ekdum same hai
+        prompt = f"""
+        Extract job details strictly in JSON format. Use the clean MARKDOWN content provided below.
+        Pay critical attention to Markdown tables for ITI/Diploma/Degree trade vacancies, Age Limits, and Mode of Selection.
+        If info is genuinely not found, write "NA".
+        
+        {{
+          "post_name": "Main title of the recruitment (e.g. Railway RRB Technician, ISRO Assistant)",
+          "organization": "Department or Company name (e.g. RRB, ISRO, UPPSC)",
+          "category": "Choose exactly ONE from: ['Government', 'PSU', 'Private']",
+          "post_type": "Choose exactly ONE from: ['Job', 'Admit Card', 'Result', 'Scholarship', 'Apprenticeship', 'Internship', 'Upcoming Exam', 'IGNORE']. If admission/counseling, output 'IGNORE'.",
+          
+          "total_posts": "Extract ONLY the numerical value of total vacancies.",
+          
+          "category_vacancies": {{
+             "General": "Number of posts for General/UR or NA",
+             "OBC": "Number of posts for OBC or NA",
+             "EWS": "Number of posts for EWS or NA",
+             "SC": "Number of posts for SC or NA",
+             "ST": "Number of posts for ST or NA"
+          }},
 
-def get_page_evidence(page_url: str, html: str) -> tuple[str, str, str, str | None]:
-    """Extract text, tables, relevant links, and one likely official PDF URL."""
-    soup = BeautifulSoup(html, "html.parser")
-    for node in soup(["script", "style", "noscript", "svg", "iframe"]):
-        node.decompose()
+          "state_wise_vacancies": [
+             {{ "state_name": "Name of the state", "vacancies": "Number of posts" }}
+          ],
 
-    tables: list[str] = []
-    for index, table in enumerate(soup.find_all("table"), start=1):
-        rows = []
-        for row in table.find_all("tr"):
-            cells = [text_limit(cell.get_text(" ", strip=True).replace("|", ""), 350)
-                     for cell in row.find_all(["th", "td"])]
-            if cells:
-                rows.append(" | ".join(cells))
-        if rows:
-            tables.append(f"--- TABLE {index} ---\n" + "\n".join(rows))
+          "multiple_posts": [
+             {{
+                "post_name": "Name of specific post OR Trade Name (e.g. Assistant/UDC, Fitter, Civil, Electrician, COPA)",
+                "vacancies": "Number of posts for this specific role/trade (Combine ITI/Diploma/Degree columns if necessary)",
+                "eligibility": "Eligibility criteria for this specific post/trade"
+             }}
+          ],
 
-    keywords = (
-        "apply", "register", "notification", "notice", "advertisement", "pdf", "download",
-        "admit", "hall ticket", "call letter", "result", "merit", "scholarship", "website",
-    )
-    links: list[str] = []
-    seen: set[str] = set()
-    official_pdf_url: str | None = None
-    for anchor in soup.find_all("a", href=True):
-        label = text_limit(anchor.get_text(" ", strip=True), 160)
-        href = urljoin(page_url, anchor["href"])
-        if not href.startswith(("http://", "https://")):
-            continue
-        href = canonical_url(href)
-        if href in seen:
-            continue
-        haystack = f"{label} {href}".lower()
-        if official_pdf_url is None and ".pdf" in urlsplit(href).path.lower() and any(
-            keyword in haystack for keyword in ("notification", "notice", "advertisement", "official", "pdf")
-        ):
-            official_pdf_url = href
-        if any(keyword in haystack for keyword in keywords):
-            seen.add(href)
-            links.append(f"{label or 'Link'} -> {href}")
-
-    return (
-        text_limit(soup.get_text(" ", strip=True), 8_000),
-        text_limit("\n\n".join(tables), 16_000),
-        "\n".join(links[:30]),
-        official_pdf_url,
-    )
-
-
-async def pdf_evidence(pdf_url: str, client: httpx.AsyncClient) -> str:
-    """Best-effort text extraction from an official notice PDF; scanned PDFs need OCR."""
-    if PdfReader is None:
-        return ""
-    try:
-        response = await client.get(pdf_url)
-        response.raise_for_status()
-        if len(response.content) > 12 * 1024 * 1024:
-            return ""
-        reader = PdfReader(BytesIO(response.content))
-        return text_limit("\n".join((page.extract_text() or "") for page in reader.pages[:15]), 12_000)
-    except Exception as exc:
-        print(f"Official PDF could not be read ({pdf_url}): {type(exc).__name__}")
-        return ""
-
-
-def build_prompt(page_text: str, tables_text: str, links_text: str) -> str:
-    return f"""
-Extract facts only from the supplied evidence. Return one valid JSON object and no Markdown.
-Use "NA" for unavailable scalar values and [] for unavailable lists. Never guess.
-`last_date` must be YYYY-MM-DD only when the date is unambiguous.
-`total_posts`, `min_age`, and `max_age` must contain numbers only when stated.
-For Result/Admit Card/Scholarship, preserve the type and do not invent vacancy data.
-
-Required JSON shape:
-{{
-  "post_name":"NA", "organization":"NA", "category":"Government|PSU|Private",
-  "post_type":"Job|Admit Card|Result|Scholarship|Apprenticeship|Internship|Upcoming Exam|IGNORE",
-  "total_posts":"NA",
-  "category_vacancies":{{"General":"NA","OBC":"NA","EWS":"NA","SC":"NA","ST":"NA"}},
-  "state_wise_vacancies":[{{"state_name":"", "vacancies":""}}],
-  "multiple_posts":[{{"post_name":"", "vacancies":"NA", "eligibility":"NA"}}],
-  "eligibility":"Overall education/eligibility requirements or NA",
-  "mode_of_selection":[], "min_age":"NA", "max_age":"NA", "pay_scale":"NA", "salary":"NA",
-  "qualifications":[], "branches":[], "location":"NA", "last_date":"NA",
-  "check_official_notice":"URL from LINKS or NA", "apply_online_link":"URL from LINKS or NA"
-}}
-
---- PAGE TEXT ---
-{page_text}
---- TABLES (highest priority for vacancy, age and eligibility) ---
-{tables_text}
---- LINKS ---
-{links_text}
-"""
-
-
-async def post_to_groq(payload: dict[str, Any]) -> dict[str, Any]:
-    if not GROQ_API_KEY:
-        raise RuntimeError("GROQ_API_KEY is not configured")
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    timeout = httpx.Timeout(connect=15.0, read=60.0, write=30.0, pool=15.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        for attempt in range(3):
-            try:
-                response = await client.post(GROQ_URL, headers=headers, json=payload)
-                response.raise_for_status()
-                return response.json()
-            except httpx.HTTPStatusError as exc:
-                retryable = exc.response.status_code in {408, 409, 429} or exc.response.status_code >= 500
-                if attempt == 2 or not retryable:
-                    raise
-            except httpx.TimeoutException:
-                if attempt == 2:
-                    raise
-            await asyncio.sleep((2 ** attempt) + random.uniform(0, 0.6))
-    raise RuntimeError("Groq retry loop ended unexpectedly")
-
-
-async def extract_job_details_with_ai(url: str) -> dict[str, Any]:
-    """Fetch one page and return AI-extracted job, result, admit-card or scholarship data."""
-    source_url = canonical_url(url)
-    try:
-        timeout = httpx.Timeout(connect=15.0, read=35.0, write=20.0, pool=15.0)
-        async with httpx.AsyncClient(timeout=timeout, headers=BROWSER_HEADERS, follow_redirects=True) as client:
-            response = await client.get(source_url)
-            response.raise_for_status()
-            content_type = response.headers.get("content-type", "").lower()
-            if content_type and "html" not in content_type and "xml" not in content_type:
-                raise ValueError(f"Expected HTML, received {content_type}")
-
-            page_text, tables_text, links_text, official_pdf_url = get_page_evidence(str(response.url), response.text)
-            if official_pdf_url:
-                notice_text = await pdf_evidence(official_pdf_url, client)
-                if notice_text:
-                    page_text = text_limit(f"{page_text}\n\n--- OFFICIAL NOTICE PDF ---\n{notice_text}", 20_000)
-
-        if len(page_text) < 80:
-            raise ValueError("Too little readable text; the site may require JavaScript or block bots")
-
-        payload = {
-            "model": GROQ_MODEL,
-            "temperature": 0,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": "You extract evidence-based recruitment data. Return JSON only."},
-                {"role": "user", "content": build_prompt(page_text, tables_text, links_text)},
-            ],
+          "mode_of_selection": ["Array of selection stages", "e.g. CBT", "Document Verification", "Medical Examination"],
+          
+          "min_age": "Minimum age limit (number only) or NA",
+          "max_age": "Maximum age limit (number only) or NA",
+          "pay_scale": "Pay scale range or NA",
+          "salary": "Salary range or NA",
+          "qualifications": ["B.Tech", "Diploma", "10th Pass", "12th Pass", "ITI", "Graduate", "PG"],
+          "branches": ["Computer Science", "Mechanical", "Civil", "Electrical", "Electronics", "Fitter", "Welder", "Electrician"],
+          "location": "City or state (or NA)",
+          "previous_year_cutoff": "Cutoff if mentioned (or NA)",
+          "railway_zone": "RRB/RRC zone (or NA)",
+          "medical_standard": "Required medical_standard (or NA)",
+          "check_official_notice": "Extract URL for 'Official Notification' or 'Download Notice' from text.",
+          "apply_online_link": "Extract URL for 'Apply Online', 'Registration' from text. If not found, write NA."
+        }}
+        
+        --- DATA TO ANALYZE (CLEAN MARKDOWN) ---
+        {page_text}
+        """
+        
+        await asyncio.sleep(4)
+        
+        groq_url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
         }
-        groq_data = await post_to_groq(payload)
-        return normalize_details(first_json_object(groq_data["choices"][0]["message"]["content"]))
-    except Exception as exc:
-        print(f"AI scraping failed for {source_url}: {type(exc).__name__}: {exc}")
-        return DEFAULT_DETAILS.copy()
+        payload = {
+            "model": "llama-3.1-8b-instant",
+            "messages": [
+                {"role": "system", "content": "You are a precise JSON data extractor. Analyze the structured markdown carefully for trade tables, eligibility, and links. Always return valid JSON only."},
+                {"role": "user", "content": prompt}
+            ],
+            "response_format": {"type": "json_object"}
+        }
+        
+        async with httpx.AsyncClient(timeout=20.0) as ai_client:
+            ai_resp = await ai_client.post(groq_url, headers=headers, json=payload)
+            if ai_resp.status_code != 200:
+                print(f"Groq API Error: {ai_resp.text}")
+                raise Exception("API Request Failed")
+                
+            ai_data = ai_resp.json()
+            raw_text = ai_data['choices'][0]['message']['content'].strip()
+            
+        return json.loads(raw_text)
+        
+    except Exception as e:
+        print(f"AI Scraping Error for {url}:", e)
+        return {
+           "post_name": "NA", "organization": "NA", "category": "Government", "post_type": "NA",
+            "total_posts": "NA", "category_vacancies": {}, "state_wise_vacancies": [], "multiple_posts": [], "eligibility": "NA",
+             "mode_of_selection": [], "min_age": "NA", "max_age": "NA", "pay_scale": "NA",
+             "salary": "NA", "qualifications": [], "branches": [], "location": "NA", "apply_online_link": "NA",
+             "check_official_notice": "NA", "previous_year_cutoff": "NA", "railway_zone": "NA", "medical_standard": "NA"
+        }
 
 # =======================
 # Pydantic Models
@@ -1117,191 +957,73 @@ async def get_admin_feedback(admin: dict = Depends(require_admin)):
 # =======================
 # Level 2 AI Scraper Logic Fix
 # =======================
-"""Second snippet replacement: source refresh and MongoDB ingestion only.
-
-Place this file beside ai_extractor_fixed.py. It imports the first snippet rather
-than merging it. `db` is intentionally the same global Motor database object
-used by the original code.
-"""
-
-
-def detect_post_type(title: str) -> str:
-    lower = title.lower()
-    if any(value in lower for value in ("syllabus", "answer key", "cut off", "cutoff")):
-        return "IGNORE"
-    if "result" in lower or "merit list" in lower:
-        return "Result"
-    if any(value in lower for value in ("admit card", "hall ticket", "call letter")):
-        return "Admit Card"
-    if "scholarship" in lower:
-        return "Scholarship"
-    if any(value in lower for value in ("exam date", "date sheet", "schedule")):
-        return "Upcoming Exam"
-    if "apprentice" in lower:
-        return "Apprenticeship"
-    if "internship" in lower:
-        return "Internship"
-    return "Job"
-
-
-def looks_like_detail_link(url: str, title: str) -> bool:
-    """Reject menu/social/category links without hard-coding a source domain."""
-    lower = url.lower()
-    path = urlsplit(url).path.rstrip("/").lower()
-    blocked = (
-        "facebook.com", "twitter.com", "x.com/", "instagram.com", "youtube.com", "t.me/",
-        "privacy-policy", "terms-and-conditions", "contact-us", "about-us", "javascript:", "mailto:",
-    )
-    category_paths = {"/latestjob", "/result", "/admitcard", "/syllabus", "/answerkey"}
-    return (
-        url.startswith(("https://", "http://"))
-        and len(title.strip()) >= 10
-        and path not in {"", "/"}
-        and path not in category_paths
-        and not any(value in lower for value in blocked)
-    )
-
-
-async def source_entries(src: dict[str, Any], client: httpx.AsyncClient) -> list[dict[str, str]]:
-    """Read one RSS XML or HTML listing page and return detail-page candidates."""
-    response = await client.get(src["url"])
-    response.raise_for_status()
-    base_url = str(response.url)
-    body = response.text
-    is_xml = "<rss" in body[:500].lower() or "<?xml" in body[:500].lower()
-    entries: list[dict[str, str]] = []
-
-    if is_xml:
-        soup = BeautifulSoup(response.content, "xml")
-        for item in soup.find_all("item")[:40]:
-            title_tag, link_tag = item.find("title"), item.find("link")
-            if not title_tag or not link_tag:
-                continue
-            entries.append({
-                "title": title_tag.get_text(" ", strip=True),
-                "link": canonical_url(urljoin(base_url, link_tag.get_text(strip=True))),
-                "summary": item.find("description").get_text(" ", strip=True) if item.find("description") else "",
-            })
-        return entries
-
-    soup = BeautifulSoup(body, "html.parser")
-    # Prefer article/post content; a simple source can still fall back to all anchors.
-    anchors = soup.select("main a[href], article a[href], #post a[href], .post a[href]") or soup.find_all("a", href=True)
-    seen: set[str] = set()
-    for anchor in anchors:
-        title = anchor.get_text(" ", strip=True)
-        link = canonical_url(urljoin(base_url, anchor["href"]))
-        if link in seen or not looks_like_detail_link(link, title):
-            continue
-        seen.add(link)
-        entries.append({"title": title, "link": link, "summary": f"Latest notification on {src['name']}."})
-        # Limit after filtering, so navigation links cannot consume the quota.
-        if len(entries) >= 40:
-            break
-    return entries
-
-
-def as_int_or_none(value: Any) -> int | None:
-    match = re.search(r"\d+", str(value))
-    return int(match.group()) if match else None
-
-
-def valid_iso_date(value: Any) -> str | None:
-    try:
-        return date.fromisoformat(str(value)).isoformat()
-    except (TypeError, ValueError):
-        return None
-
-
-def fallback_qualifications(title: str, summary: str, qualifications: list[Any]) -> list[Any]:
-    if qualifications:
-        return qualifications
-    text = f"{title} {summary}".lower()
-    found: list[str] = []
-    for phrase, label in (
-        ("12th", "12th"), ("intermediate", "12th"), ("iti", "ITI"), ("10th", "10th"),
-        ("diploma", "Diploma"), ("graduate", "Graduate"), ("b.tech", "B.Tech"), ("btech", "B.Tech"),
-    ):
-        if phrase in text and label not in found:
-            found.append(label)
-    return found or ["Not Specified"]
-
-
-async def refresh_jobs_task() -> tuple[int, int]:
-    """Second snippet: refresh sources, extract details and save new records.
-
-    It expects `db` to be the existing global Motor database variable in your app.
-    """
-    added = 0
-    today_str = date.today().isoformat()
-
-    # Only expire records that have a real extracted deadline. Do not invent +30 days.
-    result = await db.jobs.update_many(
-        {"is_active": True, "last_date": {"$type": "string", "$lt": today_str}},
-        {"$set": {"is_active": False}},
-    )
-    removed = result.modified_count
-    sources = await db.rss_sources.find({}, {"_id": 0}).to_list(50)
-
-    timeout = httpx.Timeout(connect=15.0, read=35.0, write=20.0, pool=15.0)
-    async with httpx.AsyncClient(timeout=timeout, headers=BROWSER_HEADERS, follow_redirects=True) as client:
-        for src in sources:
-            try:
-                entries = await source_entries(src, client)
-            except Exception as exc:
-                print(f"Source fetch failed for {src.get('name', src.get('url'))}: {exc}")
-                continue
-
-            for entry in entries:
-                job_link = canonical_url(entry["link"])
-                # AI may discover a different Apply URL, so `source_url` is the duplicate key.
-                existing = await db.jobs.find_one(
-                    {"$or": [{"source_url": job_link}, {"apply_link": job_link}]},
-                    {"_id": 1},
-                )
+# Duplicate check
+                existing = await db.jobs.find_one({"apply_link": job_link}, {"_id": 0, "job_id": 1})
                 if existing:
                     continue
-
-                title, summary = entry["title"], entry["summary"]
-                title_type = detect_post_type(title)
-                if title_type == "IGNORE":
+                
+                print(f"Deep scraping [{post_type}]: {job_title}")
+                ai_details = await extract_job_details_with_ai(job_link)
+                
+                # 🚀 SMART TRICK: Ignore Admissions, Counseling, and non-job links
+                if ai_details.get("post_type") == "IGNORE":
+                    print(f"🚫 Ignored Admission/Irrelevant post: {job_title}")
                     continue
+                
+                job_id = f"job_{uuid.uuid4().hex[:12]}"
+                
+                # Agar AI empty output deta hai to hum manual logic fail-safe as a backup use karte hain
+                detected_quals = ai_details.get("qualifications", [])
+                detected_branches = ai_details.get("branches", [])
+                
+                if not detected_quals or not detected_branches:
+                    combined_text = (job_title + " " + summary).lower()
+                    if not detected_quals:
+                        if any(word in combined_text for word in ["12th", "xii", "intermediate", "10+2"]): detected_quals.append("12th")
+                        if any(word in combined_text for word in ["iti", "ncvt", "scvt"]): detected_quals.append("ITI")
+                        if any(word in combined_text for word in ["10th", "matric", "ssc"]): detected_quals.append("10th")
+                        if "diploma" in combined_text: detected_quals.append("Diploma")
+                        if any(word in combined_text for word in ["btech", "b.tech", "b.e", "degree", "graduate"]): detected_quals.append("BTech")
+                    
+                    if not detected_branches:
+                        if "civil" in combined_text: detected_branches.append("Civil Engineering")
+                        if any(word in combined_text for word in ["mechanical", "fitter", "machinist"]): detected_branches.append("Mechanical Engineering")
+                        if any(word in combined_text for word in ["electrical", "electrician"]): detected_branches.append("Electrical Engineering")
+                        if "electronics" in combined_text: detected_branches.append("Electronics Engineering")
+                        if any(word in combined_text for word in ["computer", "it ", "software"]): detected_branches.append("Computer Science")
+                        
+                    if not detected_quals: detected_quals = ["Not Specified"]
 
-                print(f"Deep scraping [{title_type}]: {title}")
-                details = await extract_job_details_with_ai(job_link)
-                if details["post_type"] == "IGNORE":
-                    continue
-
-                # AI result wins when it succeeded; title-based type is a safe fallback after a failed extraction.
-                post_type = details["post_type"] if details["post_type"] in ALLOWED_POST_TYPES else title_type
-                if details["post_name"] == "NA":
-                    post_type = title_type
-
-                extracted_apply = details["apply_online_link"]
-                action_link = extracted_apply if extracted_apply != "NA" else job_link
                 await db.jobs.insert_one({
-                    "job_id": f"job_{uuid.uuid4().hex[:12]}",
-                    "source_url": job_link,
-                    "organization": details["organization"] if details["organization"] != "NA" else src["name"],
-                    "post_name": details["post_name"] if details["post_name"] != "NA" else title,
-                    "post_type": post_type,
-                    "category": details["category"] if details["category"] != "NA" else src.get("default_category", "Government"),
-                    "qualifications": fallback_qualifications(title, summary, details["qualifications"]),
-                    "branches": details["branches"],
-                    "vacancies": details["total_posts"],
-                    "pay_scale": details["pay_scale"],
-                    "salary": details["salary"],
-                    "eligibility": details["eligibility"] if details["eligibility"] != "NA" else summary,
-                    "category_vacancies": details["category_vacancies"],
-                    "multiple_posts": details["multiple_posts"],
-                    "state_wise_vacancies": details["state_wise_vacancies"],
-                    "mode_of_selection": details["mode_of_selection"],
-                    "location": details["location"],
-                    "last_date": valid_iso_date(details["last_date"]),
-                    "notification_pdf": details["check_official_notice"] if details["check_official_notice"] != "NA" else None,
-                    "apply_link": action_link,
-                    "min_age": as_int_or_none(details["min_age"]),
-                    "max_age": as_int_or_none(details["max_age"]),
+                    "job_id": job_id,
+                    
+                    # 🚀 HYBRID FALLBACKS: Agar AI blank deta hai, toh purana logic fail nahi hone dega
+                    "organization": ai_details.get("organization") if ai_details.get("organization") not in ["NA", None, ""] else src["name"],
+                    "post_name": ai_details.get("post_name") if ai_details.get("post_name") not in ["NA", None, ""] else job_title,
+                    "post_type": ai_details.get("post_type") if ai_details.get("post_type") not in ["NA", None, ""] else post_type,
+                    "category": ai_details.get("category") if ai_details.get("category") not in ["NA", None, ""] else src.get("default_category", "Government"),
+                    
+                    "branches": detected_branches,
+                    "qualifications": detected_quals, 
+                    "vacancies": ai_details.get("total_posts", "NA"),
+                    "pay_scale": ai_details.get("pay_scale", "NA"),
+                    "salary": ai_details.get("salary", "NA"),
+                    "eligibility": ai_details.get("eligibility") if ai_details.get("eligibility") not in ["NA", None] else summary,
+                    
+                    "category_vacancies": ai_details.get("category_vacancies", {}),
+                    "multiple_posts": ai_details.get("multiple_posts", []),
+                    "state_wise_vacancies": ai_details.get("state_wise_vacancies", []), 
+                    "mode_of_selection": ai_details.get("mode_of_selection", []),
+
+                    "location": ai_details.get("location", "India"),
+                    "last_date": (date.today() + timedelta(days=30)).isoformat(),
+                    
+                    "notification_pdf": ai_details.get("check_official_notice") if ai_details.get("check_official_notice") not in ["NA", None, ""] else None,
+                    "apply_link": ai_details.get("apply_online_link") if ai_details.get("apply_online_link") not in ["NA", None, ""] else job_link,
+                    
+                    "min_age": int(ai_details.get("min_age")) if str(ai_details.get("min_age")).isdigit() else 18, 
+                    "max_age": int(ai_details.get("max_age")) if str(ai_details.get("max_age")).isdigit() else 35,
+                    
                     "description": summary,
                     "is_active": True,
                     "source": f"scraper:{src['name']}",
