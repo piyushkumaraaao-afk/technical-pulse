@@ -1080,7 +1080,13 @@ for entry in entries:
                 })
                 added += 1
 
+    # Loop aur async block ke bahar aakar return karna hai (Exact 4 spaces ka gap)
     return added, removed
+
+
+# =======================
+# Startup / Seed
+# =======================
 
 
 # =======================
