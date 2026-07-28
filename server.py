@@ -987,8 +987,8 @@ async def get_admin_feedback(admin: dict = Depends(require_admin)):
 
 
 # =======================
-                # Level 2 AI Scraper Logic Fix
-                # =======================
+# Level 2 AI Scraper Logic Fix
+# =======================
                 for entry in entries:
                     title = entry["title"]
                     summary = entry.get("summary", "")
