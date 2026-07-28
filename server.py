@@ -989,96 +989,96 @@ async def get_admin_feedback(admin: dict = Depends(require_admin)):
 # =======================
 # Level 2 AI Scraper Logic Fix
 # =======================
-for entry in entries:
-                title = entry["title"]
-                summary = entry.get("summary", "")
-                title_type = detect_post_type(title)
-                
-                if title_type == "IGNORE":
-                    continue
-
-                # Duplicate check
-                job_link = canonical_url(entry["link"])
-                existing = await db.jobs.find_one(
-                    {"$or": [{"source_url": job_link}, {"apply_link": job_link}]}, 
-                    {"_id": 1}
-                )
-                if existing:
-                    continue
-                
-                print(f"Deep scraping [{title_type}]: {title}")
-                ai_details = await extract_job_details_with_ai(job_link)
-                
-                if ai_details.get("post_type") == "IGNORE":
-                    print(f"🚫 Ignored Admission/Irrelevant post: {title}")
-                    continue
-                
-                job_id = f"job_{uuid.uuid4().hex[:12]}"
-                
-                # Agar AI empty output deta hai to hum manual logic fail-safe as a backup use karte hain
-                detected_quals = ai_details.get("qualifications", [])
-                detected_branches = ai_details.get("branches", [])
-                
-                # job_title nahi, title variable use hoga yahan (previous error bachane ke liye)
-                if not detected_quals or not detected_branches:
-                    combined_text = (title + " " + summary).lower()
-                    if not detected_quals:
-                        if any(word in combined_text for word in ["12th", "xii", "intermediate", "10+2"]): detected_quals.append("12th")
-                        if any(word in combined_text for word in ["iti", "ncvt", "scvt"]): detected_quals.append("ITI")
-                        if any(word in combined_text for word in ["10th", "matric", "ssc"]): detected_quals.append("10th")
-                        if "diploma" in combined_text: detected_quals.append("Diploma")
-                        if any(word in combined_text for word in ["btech", "b.tech", "b.e", "degree", "graduate"]): detected_quals.append("BTech")
+                for entry in entries:
+                    title = entry["title"]
+                    summary = entry.get("summary", "")
+                    title_type = detect_post_type(title)
                     
-                    if not detected_branches:
-                        if "civil" in combined_text: detected_branches.append("Civil Engineering")
-                        if any(word in combined_text for word in ["mechanical", "fitter", "machinist"]): detected_branches.append("Mechanical Engineering")
-                        if any(word in combined_text for word in ["electrical", "electrician"]): detected_branches.append("Electrical Engineering")
-                        if "electronics" in combined_text: detected_branches.append("Electronics Engineering")
-                        if any(word in combined_text for word in ["computer", "it ", "software"]): detected_branches.append("Computer Science")
+                    if title_type == "IGNORE":
+                        continue
+
+                    # Duplicate check
+                    job_link = canonical_url(entry["link"])
+                    existing = await db.jobs.find_one(
+                        {"$or": [{"source_url": job_link}, {"apply_link": job_link}]}, 
+                        {"_id": 1}
+                    )
+                    if existing:
+                        continue
+                    
+                    print(f"Deep scraping [{title_type}]: {title}")
+                    ai_details = await extract_job_details_with_ai(job_link)
+                    
+                    if ai_details.get("post_type") == "IGNORE":
+                        print(f"🚫 Ignored Admission/Irrelevant post: {title}")
+                        continue
+                    
+                    job_id = f"job_{uuid.uuid4().hex[:12]}"
+                    
+                    # Agar AI empty output deta hai to hum manual logic fail-safe as a backup use karte hain
+                    detected_quals = ai_details.get("qualifications", [])
+                    detected_branches = ai_details.get("branches", [])
+                    
+                    # job_title nahi, title variable use hoga yahan (previous error bachane ke liye)
+                    if not detected_quals or not detected_branches:
+                        combined_text = (title + " " + summary).lower()
+                        if not detected_quals:
+                            if any(word in combined_text for word in ["12th", "xii", "intermediate", "10+2"]): detected_quals.append("12th")
+                            if any(word in combined_text for word in ["iti", "ncvt", "scvt"]): detected_quals.append("ITI")
+                            if any(word in combined_text for word in ["10th", "matric", "ssc"]): detected_quals.append("10th")
+                            if "diploma" in combined_text: detected_quals.append("Diploma")
+                            if any(word in combined_text for word in ["btech", "b.tech", "b.e", "degree", "graduate"]): detected_quals.append("BTech")
                         
-                    if not detected_quals: detected_quals = ["Not Specified"]
+                        if not detected_branches:
+                            if "civil" in combined_text: detected_branches.append("Civil Engineering")
+                            if any(word in combined_text for word in ["mechanical", "fitter", "machinist"]): detected_branches.append("Mechanical Engineering")
+                            if any(word in combined_text for word in ["electrical", "electrician"]): detected_branches.append("Electrical Engineering")
+                            if "electronics" in combined_text: detected_branches.append("Electronics Engineering")
+                            if any(word in combined_text for word in ["computer", "it ", "software"]): detected_branches.append("Computer Science")
+                            
+                        if not detected_quals: detected_quals = ["Not Specified"]
 
-                extracted_apply = ai_details.get("apply_online_link", "NA")
-                action_link = extracted_apply if extracted_apply != "NA" else job_link    
+                    extracted_apply = ai_details.get("apply_online_link", "NA")
+                    action_link = extracted_apply if extracted_apply != "NA" else job_link    
 
-                await db.jobs.insert_one({
-                    "job_id": job_id,
-                    "source_url": job_link,
-                    "organization": ai_details.get("organization") if ai_details.get("organization") not in ["NA", None, ""] else src["name"],
-                    "post_name": ai_details.get("post_name") if ai_details.get("post_name") not in ["NA", None, ""] else title,
-                    "post_type": ai_details.get("post_type") if ai_details.get("post_type") not in ["NA", None, ""] else title_type,
-                    "category": ai_details.get("category") if ai_details.get("category") not in ["NA", None, ""] else src.get("default_category", "Government"),
-                    
-                    "branches": detected_branches,
-                    "qualifications": detected_quals, 
-                    "vacancies": ai_details.get("total_posts", "NA"),
-                    "pay_scale": ai_details.get("pay_scale", "NA"),
-                    "salary": ai_details.get("salary", "NA"),
-                    "eligibility": ai_details.get("eligibility") if ai_details.get("eligibility") not in ["NA", None] else summary,
-                    
-                    "category_vacancies": ai_details.get("category_vacancies", {}),
-                    "multiple_posts": ai_details.get("multiple_posts", []),
-                    "state_wise_vacancies": ai_details.get("state_wise_vacancies", []), 
-                    "mode_of_selection": ai_details.get("mode_of_selection", []),
+                    await db.jobs.insert_one({
+                        "job_id": job_id,
+                        "source_url": job_link,
+                        "organization": ai_details.get("organization") if ai_details.get("organization") not in ["NA", None, ""] else src["name"],
+                        "post_name": ai_details.get("post_name") if ai_details.get("post_name") not in ["NA", None, ""] else title,
+                        "post_type": ai_details.get("post_type") if ai_details.get("post_type") not in ["NA", None, ""] else title_type,
+                        "category": ai_details.get("category") if ai_details.get("category") not in ["NA", None, ""] else src.get("default_category", "Government"),
+                        
+                        "branches": detected_branches,
+                        "qualifications": detected_quals, 
+                        "vacancies": ai_details.get("total_posts", "NA"),
+                        "pay_scale": ai_details.get("pay_scale", "NA"),
+                        "salary": ai_details.get("salary", "NA"),
+                        "eligibility": ai_details.get("eligibility") if ai_details.get("eligibility") not in ["NA", None] else summary,
+                        
+                        "category_vacancies": ai_details.get("category_vacancies", {}),
+                        "multiple_posts": ai_details.get("multiple_posts", []),
+                        "state_wise_vacancies": ai_details.get("state_wise_vacancies", []), 
+                        "mode_of_selection": ai_details.get("mode_of_selection", []),
 
-                    "location": ai_details.get("location", "India"),
-                    
-                    # 🚀 CODEX SMART DATE CHECK
-                    "last_date": valid_iso_date(ai_details.get("last_date")) or (date.today() + timedelta(days=30)).isoformat(),
-                    
-                    "notification_pdf": ai_details.get("check_official_notice") if ai_details.get("check_official_notice") not in ["NA", None, ""] else None,
-                    "apply_link": action_link,
-                    
-                    # 🚀 CODEX SMART INT EXTRACTOR
-                    "min_age": as_int_or_none(ai_details.get("min_age")) or 18, 
-                    "max_age": as_int_or_none(ai_details.get("max_age")) or 35,
-                    
-                    "description": summary,
-                    "is_active": True,
-                    "source": f"scraper:{src['name']}",
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                })
-                added += 1
+                        "location": ai_details.get("location", "India"),
+                        
+                        # 🚀 CODEX SMART DATE CHECK
+                        "last_date": valid_iso_date(ai_details.get("last_date")) or (date.today() + timedelta(days=30)).isoformat(),
+                        
+                        "notification_pdf": ai_details.get("check_official_notice") if ai_details.get("check_official_notice") not in ["NA", None, ""] else None,
+                        "apply_link": action_link,
+                        
+                        # 🚀 CODEX SMART INT EXTRACTOR
+                        "min_age": as_int_or_none(ai_details.get("min_age")) or 18, 
+                        "max_age": as_int_or_none(ai_details.get("max_age")) or 35,
+                        
+                        "description": summary,
+                        "is_active": True,
+                        "source": f"scraper:{src['name']}",
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                    })
+                    added += 1
 
         except Exception as exc:
             print(f"Fetch failed for {src.get('name')}: {exc}")
