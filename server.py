@@ -989,7 +989,15 @@ async def get_admin_feedback(admin: dict = Depends(require_admin)):
 # =======================
 # Level 2 AI Scraper Logic Fix
 # =======================
-# Duplicate check
+for entry in entries:
+                title = entry["title"]
+                summary = entry.get("summary", "")
+                title_type = detect_post_type(title)
+                
+                if title_type == "IGNORE":
+                    continue
+
+                # Duplicate check
                 job_link = canonical_url(entry["link"])
                 existing = await db.jobs.find_one(
                     {"$or": [{"source_url": job_link}, {"apply_link": job_link}]}, 
