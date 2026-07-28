@@ -18,6 +18,7 @@ import random
 import re
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 from crawl4ai import AsyncWebCrawler
+from urllib.parse import urljoin
 
 
 import jwt
@@ -107,16 +108,21 @@ async def extract_job_details_with_ai(url: str):
         async with httpx.AsyncClient(timeout=15.0, headers=browser_headers) as client:
             response = await client.get(url, follow_redirects=True)
             soup = BeautifulSoup(response.text, 'html.parser')
+            
             important_links = []
             for a in soup.find_all('a', href=True):
                 link_text = a.get_text(strip=True)
-                link_url = canonical_url(urljoin(url, a['href'])) # 🚀 Codex Smart URL
+                # Ensure canonical_url is available in your file
+                link_url = canonical_url(urljoin(url, a['href'])) 
+                
                 if any(k in link_text.lower() for k in ['apply', 'register', 'login', 'notification', 'pdf', 'admit card', 'result']):
-                    if not link_url.startswith(("http", "https")): continue 
+                    if not link_url.startswith(("http", "https")): 
+                        continue 
                     important_links.append(f"{link_text} -> {link_url}")
             
         links_text = "\n".join(important_links[:15])
 
+        # 🚀 PROMPT STRING (Properly closed)
         prompt = f"""
         Extract job details strictly in JSON format. Use the clean MARKDOWN and LINKS provided below.
         Pay critical attention to tables for ITI/Diploma/Degree trade vacancies, Age Limits, and Mode of Selection.
@@ -148,6 +154,7 @@ async def extract_job_details_with_ai(url: str):
         
         --- MARKDOWN TEXT ---
         {page_text}
+        
         --- LINKS ---
         {links_text}
         """
@@ -173,6 +180,7 @@ async def extract_job_details_with_ai(url: str):
             return first_json_object(ai_resp.json()['choices'][0]['message']['content'])
             
     except Exception as e:
+        # 🚀 EXCEPT BLOCK EKDUM SAHI JAGAH PAR
         print(f"AI Scraping Error for {url}:", e)
         return {
            "post_name": "NA", "organization": "NA", "category": "Government", "post_type": "NA",
@@ -1056,7 +1064,7 @@ async def get_admin_feedback(admin: dict = Depends(require_admin)):
                         if any(word in combined_text for word in ["computer", "it ", "software"]): detected_branches.append("Computer Science")
                         
                     if not detected_quals: detected_quals = ["Not Specified"]
-                    
+
                 extracted_apply = ai_details.get("apply_online_link", "NA")
                 action_link = extracted_apply if extracted_apply != "NA" else job_link    
 
