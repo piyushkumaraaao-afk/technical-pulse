@@ -99,7 +99,7 @@ async def extract_job_details_with_ai(url: str):
           "post_name": "Main title of the recruitment (e.g. RRB Section Controller Recruitment)",
           "organization": "Department or Company name",
           "category": "Choose exactly ONE from: ['Government', 'PSU', 'Private']",
-          "post_type": "Choose exactly ONE from: ['Job', 'Admit Card', 'Result', 'Scholarship', 'Upcoming Exam']",
+          "post_type": "Choose exactly ONE from: ['Job', 'Admit Card', 'Result', 'Scholarship', 'Upcoming Exam', 'IGNORE']. STRICT RULE: If the text is about School/College Admissions, Counseling, or Entrance Exams, you MUST output 'IGNORE'.",
           
           "total_posts": "Extract ONLY the numerical value of total vacancies/posts/Total Vacancy (e.g. 6557).",
           
@@ -115,7 +115,7 @@ async def extract_job_details_with_ai(url: str):
              {{
                 "post_name": "Name of specific post (e.g. Junior Executive Finance)",
                 "vacancies": "Number of posts for this specific role (e.g. 36)",
-                "trade name": "Name of trade or Name of branch (e.g. Civil, Fitter, COPA, Electrical, Electrician)"
+                "trade name": "Name of trade or Name of branch (e.g. Civil, Fitter, COPA, Electrical, Electrician)",
                 "eligibility": "Eligibility criteria for this specific post (e.g. MBA with Finance)"
              }}
           ],
@@ -1131,14 +1131,9 @@ async def refresh_jobs_task() -> tuple[int, int]:
                     continue
                 
                 job_id = f"job_{uuid.uuid4().hex[:12]}"
-                
-                # ... baki ka purana code (detected_quals, detected_branches etc) waise hi rahega ...
-                
-                # Database Entry
                 await db.jobs.insert_one({
                     "job_id": job_id,
                     
-                    # 🚀 BUGS FIXED: Ab AI ka nikala hua data save hoga! (Agar AI fail ho jaye toh default RSS wala use hoga)
                     "organization": ai_details.get("organization") if ai_details.get("organization") not in ["NA", None] else src["name"],
                     "post_name": ai_details.get("post_name") if ai_details.get("post_name") not in ["NA", None] else job_title,
                     "post_type": ai_details.get("post_type") if ai_details.get("post_type") not in ["NA", None] else post_type,
@@ -1156,11 +1151,11 @@ async def refresh_jobs_task() -> tuple[int, int]:
 
                     "location": ai_details.get("location", "India"),
                     "last_date": (date.today() + timedelta(days=30)).isoformat(),
-                    # Insert block ke andar apply link wale hisse ke aas pass:
-                    "notification_pdf": ai_details.get("notification_pdf") if ai_details.get("notification_pdf") not in ["NA", None, ""] else None,
-                    "apply_link": ai_details.get("apply_link") if ai_details.get("apply_link") not in ["NA", None, ""] else job_link,
                     
-                    # 🚀 FIX: AI ki Min/Max Age yahan aayegi
+                    # 🚀 BUGS FIXED: Yahan names match kar diye gaye hain
+                    "notification_pdf": ai_details.get("check_official_notice") if ai_details.get("check_official_notice") not in ["NA", None, ""] else None,
+                    "apply_link": ai_details.get("apply_online_link") if ai_details.get("apply_online_link") not in ["NA", None, ""] else job_link,
+                    
                     "min_age": int(ai_details.get("min_age")) if str(ai_details.get("min_age")).isdigit() else 18, 
                     "max_age": int(ai_details.get("max_age")) if str(ai_details.get("max_age")).isdigit() else 35,
                     
