@@ -1080,14 +1080,11 @@ for entry in entries:
                 })
                 added += 1
 
-    # Loop aur async block ke bahar aakar return karna hai (Exact 4 spaces ka gap)
+        except Exception as e:
+            print(f"Fetch failed for {src.get('name')}: {e}")
+
+    print(f"Refresh jobs complete: +{added} added, {removed} expired")
     return added, removed
-
-
-# =======================
-# Startup / Seed
-# =======================
-
 
 # =======================
 # Startup / Seed
