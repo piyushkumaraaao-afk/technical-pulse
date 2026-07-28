@@ -154,45 +154,9 @@ async def extract_job_details_with_ai(url: str):
         
         --- MARKDOWN TEXT ---
         {page_text}
-        
         --- LINKS ---
         {links_text}
-        """
-        
-        await asyncio.sleep(4)
-        
-        groq_url = "https://api.groq.com/openai/v1/chat/completions"
-        headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-        payload = {
-            "model": "llama-3.1-8b-instant",
-            "messages": [
-                {"role": "system", "content": "You are a precise JSON data extractor. Always return valid JSON."},
-                {"role": "user", "content": prompt}
-            ],
-            "response_format": {"type": "json_object"}
-        }
-        
-        async with httpx.AsyncClient(timeout=25.0) as ai_client:
-            ai_resp = await ai_client.post(groq_url, headers=headers, json=payload)
-            ai_resp.raise_for_status()
-            
-            # 🚀 CODEX BULLETPROOF PARSING
-            return first_json_object(ai_resp.json()['choices'][0]['message']['content'])
-            
-    except Exception as e:
-        # 🚀 EXCEPT BLOCK EKDUM SAHI JAGAH PAR
-        print(f"AI Scraping Error for {url}:", e)
-        return {
-           "post_name": "NA", "organization": "NA", "category": "Government", "post_type": "NA",
-            "total_posts": "NA", "category_vacancies": {}, "state_wise_vacancies": [], "multiple_posts": [], "eligibility": "NA",
-             "mode_of_selection": [], "min_age": "NA", "max_age": "NA", "pay_scale": "NA", "last_date": "NA",
-             "salary": "NA", "qualifications": [], "branches": [], "location": "NA", "apply_online_link": "NA",
-             "check_official_notice": "NA"
-        }
-        
-        --- DATA TO ANALYZE (CLEAN MARKDOWN) ---
-        {page_text}
-        """
+        """ # 👈 YEH WALE TRIPLE QUOTES MISSING THE! Isko add karein.
         
         await asyncio.sleep(4)
         
