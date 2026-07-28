@@ -62,47 +62,26 @@ from bs4 import BeautifulSoup
 
 async def extract_job_details_with_ai(url: str):
     try:
-        browser_headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-        }
-        
-        async with httpx.AsyncClient(timeout=20.0, headers=browser_headers) as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.get(url, follow_redirects=True)
             
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # 🚀 HYBRID TRICK 1: TABLES KO STRUCTURED FORMAT MEIN CONVERT KARO
-        structured_tables = []
-        for idx, table in enumerate(soup.find_all('table')):
-            table_data = []
-            for row in table.find_all('tr'):
-                cols = [col.get_text(separator=" ", strip=True).replace("|", "") for col in row.find_all(['th', 'td'])]
-                if cols:
-                    table_data.append(" | ".join(cols))
-            if table_data:
-                structured_tables.append(f"--- Table {idx+1} ---\n" + "\n".join(table_data))
-        tables_text = "\n\n".join(structured_tables)
-        
-        # 🚀 HYBRID TRICK 2: LINKS KO ALAG SE NIKALO
-        important_links = []
+        # 🚀 MAGIC TRICK 1: HTML tags hatane se pehle, saare Links ko text me badal do
+        # Taaki AI ko apply link aur notification pdf aaram se dikh jaye
         for a in soup.find_all('a', href=True):
             link_text = a.get_text(strip=True)
             link_url = a['href']
-            text_lower = link_text.lower()
-            if any(k in text_lower for k in ['apply', 'register', 'login', 'notification', 'notice', 'pdf', 'click here', 'admit card', 'result', 'website']):
-                if link_url.startswith("/"): continue 
-                important_links.append(f"{link_text} -> {link_url}")
-        links_text = "\n".join(important_links[:15])
+            # Link ko bracket me text ke bagal me chipka do: "Apply Online [Link: https://...]"
+            a.replace_with(f" {link_text} [Link: {link_url}] ")
+            
+        # Ab hum text nikalenge toh links gayab nahi honge! (Limit 3500 chars kar di taaki links fit ho jayein)
+        page_text = soup.get_text(separator=' ', strip=True)[:3500] 
 
-        # Page ka normal text
-        page_text = soup.get_text(separator=' ', strip=True)[:3000] 
-
-        # 🚀 HYBRID TRICK 3: AI KO CLEAN DATA FEED KARO
+        # 🚀 MAGIC TRICK 2: Master Prompt jisme saare Synonyms bataye gaye hain
         prompt = f"""
-        Extract the following job details strictly in JSON format. Use the provided TEXT, TABLES, and LINKS sections carefully.
-        Pay very close attention to the TABLES for ITI/Diploma/Degree trade vacancies and post-wise eligibility.
-        If info is genuinely not found, write "NA".
+        Extract the following job/exam details from the text below strictly in JSON format.
+        Pay close attention to synonyms. If info is genuinely not found, write "NA".
         
         {{
           "post_name": "Main title of the recruitment (e.g. Railway RRB Technician, ISRO Assistant)",
