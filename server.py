@@ -62,18 +62,33 @@ from bs4 import BeautifulSoup
 
 async def extract_job_details_with_ai(url: str):
     try:
+        # 🚀 SMART TRICK 1: Browser Headers
         browser_headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
         }
         
-        # 🚀 IMPROVEMENT 1: Increased timeout to 30s to prevent 'job not found' due to slow loading
-        async with httpx.AsyncClient(timeout=30.0, headers=browser_headers) as client:
+        async with httpx.AsyncClient(timeout=20.0, headers=browser_headers) as client:
             response = await client.get(url, follow_redirects=True)
             
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Extract important links carefully
+        # 🚀 HYBRID TRICK A: HTML Tables ko clean text/rows mein convert karna
+        # Isse AI ko Age Limit, Vacancy aur Eligibility ekdum clear dikhegi!
+        structured_tables = []
+        for table in soup.find_all('table'):
+            table_data = []
+            for row in table.find_all('tr'):
+                # Har column ko '|' se separate karenge taaki AI ko table samajh aaye
+                row_data = [cell.get_text(separator=" ", strip=True) for cell in row.find_all(['th', 'td'])]
+                if row_data:
+                    table_data.append(" | ".join(row_data))
+            if table_data:
+                structured_tables.append("\n".join(table_data))
+        
+        tables_string = "\n\n--- EXTRACTED DATA TABLES ---\n" + "\n\n".join(structured_tables)
+
+        # 🚀 SMART TRICK 2: Important links extract karna
         important_links = []
         for a in soup.find_all('a', href=True):
             link_text = a.get_text(strip=True)
@@ -83,39 +98,28 @@ async def extract_job_details_with_ai(url: str):
                 if link_url.startswith("/"): continue 
                 important_links.append(f"{link_text} -> {link_url}")
 
-        # 🚀 IMPROVEMENT 2: Retain Table Format. Har column ke beech mein ' | ' lagaya hai 
-        # Taki AI ko samajh aaye ki yeh table ka data hai (jaise screenshot mein Trade Name | ITI | Diploma)
-        for table in soup.find_all("table"):
-            for tr in table.find_all("tr"):
-                for td in tr.find_all(["td", "th"]):
-                    td.append(" | ")
-                tr.append("\n")
-                
-        # Faltu ke scripts aur styling hata dein taki text saaf rahe
-        for script in soup(["script", "style"]):
-            script.extract()
-
-        # 🚀 IMPROVEMENT 3: Increased text limit from 3500 to 15000. 
-        # Ab page ke last tak ki sari details (Age limit, Vacancy table, Salary) capture hongi.
-        page_text = soup.get_text(separator=' ', strip=True)[:15000] 
+        # 🚀 HYBRID TRICK B: Normal text ko bhi saaf karna (' | ' use karke words ko chipakne se rokna)
+        page_text = soup.get_text(separator=' | ', strip=True)[:3500] 
         
+        # Sab kuch ek sath combine karna AI ke liye
+        final_content = page_text + tables_string
         if important_links:
-            page_text += "\n\n--- IMPORTANT LINKS ---\n" + "\n".join(important_links[:20])
+            final_content += "\n\n--- IMPORTANT LINKS ---\n" + "\n".join(important_links[:15])
 
+        # 🚀 SMART TRICK 3: Prompt ko Hybrid Data ke hisaab se update kiya
         prompt = f"""
-        Extract the following job details from the text below strictly in JSON format.
-        CRITICAL INSTRUCTIONS: 
-        - Pay close attention to tables (data separated by '|'). 
-        - Extract Trade-wise (e.g., Fitter, Assistant) and Category-wise posts accurately.
-        - If info is genuinely not found, write "NA".
+        Extract the following job details strictly in JSON format.
+        I have provided RAW TEXT, EXTRACTED DATA TABLES, and IMPORTANT LINKS. 
+        HEAVILY rely on the 'EXTRACTED DATA TABLES' for Post Names, Age Limits, Vacancies, and Eligibility.
+        If info is genuinely not found, write "NA".
         
         {{
-          "post_name": "Main title of the recruitment (e.g. Junior Engineer, Clerk, Safai Karmchari, Nursing Officer, Manager, Assistant)",
-          "organization": "Department or Company name (e.g. RRB, ISRO, UPPSC, AIIMS)",
+          "post_name": "Main title of the recruitment (e.g. Junior Engineer, Clerk, Safai Karmchari, Nursing Officer, Manager, Assistant, RRB Technician)",
+          "organization": "Extract the Department or Company name (e.g. Railway RRB, ISRO, SAIL, UPPSC, AIIMS)",
           "category": "Choose exactly ONE from: ['Government', 'PSU', 'Private']",
-          "post_type": "Choose exactly ONE from: ['Job', 'Admit Card', 'Result', 'Scholarship', 'Apprenticeship', 'Internship', 'Upcoming Exam', 'IGNORE']. STRICT RULE: If about School/College Admissions, Counseling, output 'IGNORE'.",
+          "post_type": "Choose exactly ONE from: ['Job', 'Admit Card', 'Result', 'Scholarship', 'Apprenticeship', 'Internship', 'Upcoming Exam', 'IGNORE']. STRICT RULE: If about School/College Admissions or Counseling, output 'IGNORE'.",
           
-          "total_posts": "Extract ONLY the numerical value of total vacancies (e.g. 6557).",
+          "total_posts": "Extract ONLY the numerical value of total vacancies/posts (e.g. 6557, 242). Check the tables.",
           
           "category_vacancies": {{
              "General": "Number of posts for General/UR or NA",
@@ -134,31 +138,32 @@ async def extract_job_details_with_ai(url: str):
 
           "multiple_posts": [
              {{
-                "post_name": "Name of specific post OR Trade/Branch name (e.g. Civil, Fitter, Clerk)",
+                "post_name": "Name of specific post OR Trade/Branch name (e.g. Assistant/UDC, Fitter, Electrician, Technician Gr-III)",
                 "vacancies": "Number of posts for this specific role/trade",
-                "eligibility": "Eligibility criteria for this specific post/trade/category"
+                "trade name": "Name of trade or branch if applicable (e.g. Civil, Fitter, COPA)",
+                "eligibility": "Eligibility criteria for this specific post/trade/category extracted from the tables (e.g. Graduation Degree, ITI in Fitter)"
              }}
           ],
 
           "mode_of_selection": ["Array of selection stages", "e.g. CBT", "Document Verification", "Medical Examination"],
           
-          "min_age": "Minimum age limit (number only) or NA",
-          "max_age": "Maximum age limit (number only) or NA",
+          "min_age": "Extract Minimum Age (number only, e.g. 18) from the Age Limit tables/text. If not given, write NA.",
+          "max_age": "Extract Maximum Age (number only, e.g. 30 or 33) from the Age Limit tables/text. If not given, write NA.",
           "pay_scale": "Pay scale range or NA",
           "salary": "Salary range or NA",
-          "qualifications": ["B.Tech", "Diploma", "10th Pass", "12th Pass"],
-          "branches": ["Computer Science", "Mechanical", "Civil", "Electrical", "Electronics"],
-          "location": "City or state (or NA)",
+          "qualifications": ["B.Tech", "Diploma", "10th Pass", "12th Pass", "ITI", "Graduation"],
+          "branches": ["Computer Science", "Mechanical", "Civil", "Electrical", "Electronics", "Fitter", "Electrician"],
+          "location": "City, state or HQ of the job (e.g. Rourkela, UP, India) or NA",
           "previous_year_cutoff": "Cutoff if mentioned (or NA)",
-          "railway_zone": "RRB/RRC zone (or NA)",
+          "railway_zone": "RRB/RRC zone if applicable (or NA)",
           "medical_standard": "Required medical_standard (or NA)",
-          "check_official_notice": "Look for links labeled 'Download Notification' or 'Official Notice'. Extract URL from [Link: ...] bracket.",
-          "apply_online_link": "Look for 'Apply Online', 'Registration', or 'Login'. Extract the URL from inside the [Link: ...] bracket. If not found, write NA."
+          "check_official_notice": "Extract URL for 'Official Notification' from the IMPORTANT LINKS. If not found, write NA.",
+          "apply_online_link": "Extract URL for 'Apply Online' or 'Registration' from the IMPORTANT LINKS. If not found, write NA."
         }}
-        Text: {page_text}
+        Text and Tables to analyze: {final_content}
         """
         
-        await asyncio.sleep(2)
+        await asyncio.sleep(4)
         
         groq_url = "https://api.groq.com/openai/v1/chat/completions"
         headers = {
@@ -166,18 +171,15 @@ async def extract_job_details_with_ai(url: str):
             "Content-Type": "application/json"
         }
         payload = {
-            # 🚀 IMPROVEMENT 4: Switched to llama-3.3-70b-versatile. Yeh bada model hai jo tables ko 
-            # asani se samajh leta hai aur strict JSON return karta hai.
-            "model": "llama-3.3-70b-versatile",
+            "model": "llama-3.1-8b-instant",
             "messages": [
-                {"role": "system", "content": "You are a precise JSON data extractor. Understand synonyms carefully. Group State, Trade, Category, Vacancy, and Eligibility together properly. Always return valid JSON only."},
+                {"role": "system", "content": "You are a precise JSON data extractor. Understand synonyms carefully. Heavily use the Extracted Tables to map Trades, Categories, Vacancies, and Eligibility together accurately. Always return valid JSON only."},
                 {"role": "user", "content": prompt}
             ],
-            "response_format": {"type": "json_object"},
-            "temperature": 0.1 # Very low temperature for highly accurate data extraction
+            "response_format": {"type": "json_object"}
         }
         
-        async with httpx.AsyncClient(timeout=30.0) as ai_client:
+        async with httpx.AsyncClient(timeout=20.0) as ai_client:
             ai_resp = await ai_client.post(groq_url, headers=headers, json=payload)
             if ai_resp.status_code != 200:
                 print(f"Groq API Error: {ai_resp.text}")
