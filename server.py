@@ -987,8 +987,8 @@ async def get_admin_feedback(admin: dict = Depends(require_admin)):
 
 
 # =======================
-# Level 2 AI Scraper Logic Fix
-# =======================
+                # Level 2 AI Scraper Logic Fix
+                # =======================
                 for entry in entries:
                     title = entry["title"]
                     summary = entry.get("summary", "")
@@ -1019,7 +1019,6 @@ async def get_admin_feedback(admin: dict = Depends(require_admin)):
                     detected_quals = ai_details.get("qualifications", [])
                     detected_branches = ai_details.get("branches", [])
                     
-                    # job_title nahi, title variable use hoga yahan (previous error bachane ke liye)
                     if not detected_quals or not detected_branches:
                         combined_text = (title + " " + summary).lower()
                         if not detected_quals:
@@ -1063,13 +1062,10 @@ async def get_admin_feedback(admin: dict = Depends(require_admin)):
 
                         "location": ai_details.get("location", "India"),
                         
-                        # 🚀 CODEX SMART DATE CHECK
                         "last_date": valid_iso_date(ai_details.get("last_date")) or (date.today() + timedelta(days=30)).isoformat(),
-                        
                         "notification_pdf": ai_details.get("check_official_notice") if ai_details.get("check_official_notice") not in ["NA", None, ""] else None,
                         "apply_link": action_link,
                         
-                        # 🚀 CODEX SMART INT EXTRACTOR
                         "min_age": as_int_or_none(ai_details.get("min_age")) or 18, 
                         "max_age": as_int_or_none(ai_details.get("max_age")) or 35,
                         
@@ -1079,9 +1075,6 @@ async def get_admin_feedback(admin: dict = Depends(require_admin)):
                         "created_at": datetime.now(timezone.utc).isoformat(),
                     })
                     added += 1
-
-        except Exception as exc:
-            print(f"Fetch failed for {src.get('name')}: {exc}")
 
     print(f"Refresh jobs complete: +{added} added, {removed} expired")
     return added, removed
