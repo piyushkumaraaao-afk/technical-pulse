@@ -13,7 +13,6 @@ from datetime import datetime, timedelta, timezone, date
 from typing import List, Optional, Literal
 from fastapi.security import HTTPBearer
 from fastapi import Query
-from fastapi import BackgroundTasks
 
 import jwt
 import bcrypt
@@ -55,32 +54,56 @@ GROQ_API_KEY = "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"
 
 async def extract_job_details_with_ai(url: str):
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        # 🚀 HYBRID TRICK 1: Browser Headers taaki koi website block na kare
+        browser_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        }
+        
+        async with httpx.AsyncClient(timeout=20.0, headers=browser_headers) as client:
             response = await client.get(url, follow_redirects=True)
             
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # 🚀 SMART TRICK 1: HTML tags hatane se pehle, saare Links ko text me badal do
-        # Isse AI ko 'Apply Online' aur 'Notification' ke asali links dikh jayenge
+        # 🚀 HYBRID TRICK 2: Webpage ki asali Tables ko dhoondh kar AI ko dena
+        structured_tables = []
+        for idx, table in enumerate(soup.find_all('table')):
+            table_data = []
+            for row in table.find_all('tr'):
+                cols = [col.get_text(separator=" ", strip=True).replace("|", "") for col in row.find_all(['th', 'td'])]
+                if cols:
+                    table_data.append(" | ".join(cols))
+            if table_data:
+                structured_tables.append(f"--- Table {idx+1} ---\n" + "\n".join(table_data))
+        tables_text = "\n\n".join(structured_tables)
+        
+        # 🚀 HYBRID TRICK 3: Sirf Kaam ke Links (Apply, PDF, Admit Card) nikalna
+        important_links = []
         for a in soup.find_all('a', href=True):
             link_text = a.get_text(strip=True)
             link_url = a['href']
-            a.replace_with(f" {link_text} [Link: {link_url}] ")
+            text_lower = link_text.lower()
+            if any(k in text_lower for k in ['apply', 'register', 'login', 'notification', 'notice', 'pdf', 'click here', 'admit card', 'result', 'website']):
+                if link_url.startswith("/"): continue 
+                important_links.append(f"{link_text} -> {link_url}")
+        links_text = "\n".join(important_links[:15])
 
-        # Token limit thodi badha di taaki links fit ho jayein (2500 -> 3500 characters)
-        page_text = soup.get_text(separator=' ', strip=True)[:3500] 
+        # Page ka normal text
+        page_text = soup.get_text(separator=' ', strip=True)[:3000] 
 
-        # 🚀 SMART TRICK 2: Synonyms add kiye aur Comma (,) wali JSON error fix ki
+        # 🚀 SMART PROMPT: Reference Photos jaisa exact data nikalne ki command
         prompt = f"""
-        Extract the following job details from the text below strictly in JSON format.
-        Pay close attention to synonyms. If info is genuinely not found, write "NA".
+        Extract job details strictly in JSON format. Use the TEXT, TABLES, and LINKS provided below.
+        Pay critical attention to TABLES for ITI/Diploma/Degree trade vacancies, Age Limits, and Mode of Selection.
+        If info is genuinely not found, write "NA".
+        
         {{
-          "post_name": "Main title of the recruitment (e.g. RRB Section Controller Recruitment)",
-          "organization": "Department or Company name",
+          "post_name": "Main title of the recruitment (e.g. Railway RRB Technician, ISRO Assistant)",
+          "organization": "Department or Company name (e.g. RRB, ISRO, UPPSC)",
           "category": "Choose exactly ONE from: ['Government', 'PSU', 'Private']",
-          "post_type": "Choose exactly ONE from: ['Job', 'Admit Card', 'Result', 'Upcoming Exam']",
+          "post_type": "Choose exactly ONE from: ['Job', 'Admit Card', 'Result', 'Scholarship', 'Apprenticeship', 'Internship', 'Upcoming Exam', 'IGNORE']. If admission/counseling, output 'IGNORE'.",
           
-          "total_posts": "Extract ONLY the numerical value of total vacancies/posts/Total Vacancy (e.g. 6557).",
+          "total_posts": "Extract ONLY the numerical value of total vacancies.",
           
           "category_vacancies": {{
              "General": "Number of posts for General/UR or NA",
@@ -90,11 +113,15 @@ async def extract_job_details_with_ai(url: str):
              "ST": "Number of posts for ST or NA"
           }},
 
+          "state_wise_vacancies": [
+             {{ "state_name": "Name of the state", "vacancies": "Number of posts" }}
+          ],
+
           "multiple_posts": [
              {{
-                "post_name": "Name of specific post (e.g. Junior Executive Finance)",
-                "vacancies": "Number of posts for this specific role (e.g. 36)",
-                "eligibility": "Eligibility criteria for this specific post (e.g. MBA with Finance)"
+                "post_name": "Name of specific post OR Trade Name (e.g. Assistant/UDC, Fitter, Civil, Electrician, COPA)",
+                "vacancies": "Number of posts for this specific role/trade (Combine ITI/Diploma/Degree columns if necessary)",
+                "eligibility": "Eligibility criteria for this specific post/trade"
              }}
           ],
 
@@ -104,30 +131,38 @@ async def extract_job_details_with_ai(url: str):
           "max_age": "Maximum age limit (number only) or NA",
           "pay_scale": "Pay scale range or NA",
           "salary": "Salary range or NA",
-          "qualifications": ["B.Tech", "Diploma", "10th Pass", "12th Pass"],
-          "branches": ["Computer Science", "Mechanical", "Civil", "Electrical", "Electronics"],
+          "qualifications": ["B.Tech", "Diploma", "10th Pass", "12th Pass", "ITI", "Graduate", "PG"],
+          "branches": ["Computer Science", "Mechanical", "Civil", "Electrical", "Electronics", "Fitter", "Welder", "Electrician"],
           "location": "City or state (or NA)",
           "previous_year_cutoff": "Cutoff if mentioned (or NA)",
           "railway_zone": "RRB/RRC zone (or NA)",
           "medical_standard": "Required medical_standard (or NA)",
-          "check_official_notice": "Look for links labeled 'Download Notification' or 'Official Notice'. Extract URL from [Link: ...] bracket.",
-          "apply_online_link": "Look for 'Apply Online', 'Registration', or 'Login'. Extract the URL from inside the [Link: ...] bracket. If not found, write NA."
+          "check_official_notice": "Extract URL for 'Official Notification' or 'Download Notice' from LINKS.",
+          "apply_online_link": "Extract URL for 'Apply Online', 'Registration' from LINKS. If not found, write NA."
         }}
-        Text: {page_text}
+        
+        --- DATA TO ANALYZE ---
+        TEXT:
+        {page_text}
+        
+        TABLES (CRITICAL FOR VACANCIES & ELIGIBILITY):
+        {tables_text}
+        
+        LINKS:
+        {links_text}
         """
         
-        # Groq API ko overload hone se bachane ke liye 4 second ka pause
         await asyncio.sleep(4)
         
         groq_url = "https://api.groq.com/openai/v1/chat/completions"
         headers = {
-            "Authorization": f"Bearer {GROQ_API_KEY}", # Ensure GROQ_API_KEY is defined in your environment
+            "Authorization": f"Bearer {GROQ_API_KEY}",
             "Content-Type": "application/json"
         }
         payload = {
             "model": "llama-3.1-8b-instant",
             "messages": [
-                {"role": "system", "content": "You are a precise JSON data extractor. Understand synonyms carefully. Always return valid JSON only."},
+                {"role": "system", "content": "You are a precise JSON data extractor. Analyze structured TABLES carefully for trade, eligibility, and vacancies. Always return valid JSON only."},
                 {"role": "user", "content": prompt}
             ],
             "response_format": {"type": "json_object"}
@@ -146,10 +181,9 @@ async def extract_job_details_with_ai(url: str):
         
     except Exception as e:
         print(f"AI Scraping Error for {url}:", e)
-        # 🚀 SMART TRICK 3: App crash se bachne ke liye arrays/objects ko "NA" ki jagah [] aur {} diya gaya hai
         return {
            "post_name": "NA", "organization": "NA", "category": "Government", "post_type": "NA",
-            "total_posts": "NA", "category_vacancies": {}, "multiple_posts": [], "eligibility": "NA",
+            "total_posts": "NA", "category_vacancies": {}, "state_wise_vacancies": [], "multiple_posts": [], "eligibility": "NA",
              "mode_of_selection": [], "min_age": "NA", "max_age": "NA", "pay_scale": "NA",
              "salary": "NA", "qualifications": [], "branches": [], "location": "NA", "apply_online_link": "NA",
              "check_official_notice": "NA", "previous_year_cutoff": "NA", "railway_zone": "NA", "medical_standard": "NA"
@@ -1078,7 +1112,7 @@ async def refresh_jobs_task() -> tuple[int, int]:
                 print(f"Deep scraping [{post_type}]: {job_title}")
                 ai_details = await extract_job_details_with_ai(job_link)
                 
-                # 🚀 NEW FIX: Ignore Admissions, Counseling, and non-job links
+                # 🚀 SMART TRICK: Ignore Admissions, Counseling, and non-job links
                 if ai_details.get("post_type") == "IGNORE":
                     print(f"🚫 Ignored Admission/Irrelevant post: {job_title}")
                     continue
@@ -1110,7 +1144,7 @@ async def refresh_jobs_task() -> tuple[int, int]:
                 await db.jobs.insert_one({
                     "job_id": job_id,
                     
-                    # 🚀 HYBRID FALLBACKS: Agar AI blank deta hai, toh purana src["name"] ya job_title set ho jayega.
+                    # 🚀 HYBRID FALLBACKS: Agar AI blank deta hai, toh purana logic fail nahi hone dega
                     "organization": ai_details.get("organization") if ai_details.get("organization") not in ["NA", None, ""] else src["name"],
                     "post_name": ai_details.get("post_name") if ai_details.get("post_name") not in ["NA", None, ""] else job_title,
                     "post_type": ai_details.get("post_type") if ai_details.get("post_type") not in ["NA", None, ""] else post_type,
@@ -1131,8 +1165,8 @@ async def refresh_jobs_task() -> tuple[int, int]:
                     "location": ai_details.get("location", "India"),
                     "last_date": (date.today() + timedelta(days=30)).isoformat(),
                     
-                    "check_official_notice": ai_details.get("check_official_notice") if ai_details.get("check_official_notice") not in ["NA", None, ""] else None,
-                    "apply_online_link": ai_details.get("apply_online_link") if ai_details.get("apply_online_link") not in ["NA", None, ""] else job_link,
+                    "notification_pdf": ai_details.get("check_official_notice") if ai_details.get("check_official_notice") not in ["NA", None, ""] else None,
+                    "apply_link": ai_details.get("apply_online_link") if ai_details.get("apply_online_link") not in ["NA", None, ""] else job_link,
                     
                     "min_age": int(ai_details.get("min_age")) if str(ai_details.get("min_age")).isdigit() else 18, 
                     "max_age": int(ai_details.get("max_age")) if str(ai_details.get("max_age")).isdigit() else 35,
