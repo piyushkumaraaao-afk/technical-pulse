@@ -13,11 +13,11 @@ from datetime import datetime, timedelta, timezone, date
 from typing import List, Optional, Literal, Any
 from fastapi.security import HTTPBearer
 from fastapi import Query
-from ai extractor fixed import(
-    ALLOWED POST TYPES,
-    BROWSER HEADERS,
-    canonical url,
-    extract job details with ai,
+from ai_extractor_fixed import (
+    ALLOWED_POST_TYPES,
+    BROWSER_HEADERS,
+    canonical_url,
+    extract_job_details_with_ai,
 )
 from future import annotations
 from io import BytesIO
