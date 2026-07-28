@@ -19,7 +19,6 @@ from ai_extractor_fixed import (
     canonical_url,
     extract_job_details_with_ai,
 )
-from future import annotations
 from io import BytesIO
 import random
 import re
@@ -69,8 +68,6 @@ GROQ_API_KEY = "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"
 This file has no database or RSS-refresh code. It exports
 `extract_job_details_with_ai(url)` for the refresh task to call.
 """
-
-from __future__ import annotations
 
 import asyncio
 from io import BytesIO
