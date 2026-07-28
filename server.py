@@ -130,7 +130,7 @@ async def extract_job_details_with_ai(url: str):
         
         {{
           "post_name": "Main title of the recruitment",
-          "organization": "Department or Company name",
+          "organization": "Department",
           "category": "Choose exactly ONE from: ['Government', 'PSU', 'Private']",
           "post_type": "Choose exactly ONE from: ['Job', 'Admit Card', 'Result', 'Scholarship', 'Apprenticeship', 'Internship', 'Upcoming Exam', 'IGNORE']. If admission/counseling, output 'IGNORE'.",
           "total_posts": "Extract ONLY the numerical value of total vacancies.",
