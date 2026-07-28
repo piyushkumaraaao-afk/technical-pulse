@@ -1011,8 +1011,9 @@ async def get_admin_feedback(admin: dict = Depends(require_admin)):
                 detected_quals = ai_details.get("qualifications", [])
                 detected_branches = ai_details.get("branches", [])
                 
+                # job_title nahi, title variable use hoga yahan (previous error bachane ke liye)
                 if not detected_quals or not detected_branches:
-                    combined_text = (job_title + " " + summary).lower()
+                    combined_text = (title + " " + summary).lower()
                     if not detected_quals:
                         if any(word in combined_text for word in ["12th", "xii", "intermediate", "10+2"]): detected_quals.append("12th")
                         if any(word in combined_text for word in ["iti", "ncvt", "scvt"]): detected_quals.append("ITI")
