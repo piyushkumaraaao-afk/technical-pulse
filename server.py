@@ -1125,15 +1125,6 @@ used by the original code.
 """
 
 
-
-from ai_extractor_fixed import (
-    ALLOWED_POST_TYPES,
-    BROWSER_HEADERS,
-    canonical_url,
-    extract_job_details_with_ai,
-)
-
-
 def detect_post_type(title: str) -> str:
     lower = title.lower()
     if any(value in lower for value in ("syllabus", "answer key", "cut off", "cutoff")):
