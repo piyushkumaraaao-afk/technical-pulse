@@ -67,11 +67,13 @@ async def extract_job_details_with_ai(url: str):
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
         }
         
-        async with httpx.AsyncClient(timeout=20.0, headers=browser_headers) as client:
+        # 🚀 IMPROVEMENT 1: Increased timeout to 30s to prevent 'job not found' due to slow loading
+        async with httpx.AsyncClient(timeout=30.0, headers=browser_headers) as client:
             response = await client.get(url, follow_redirects=True)
             
         soup = BeautifulSoup(response.text, 'html.parser')
         
+        # Extract important links carefully
         important_links = []
         for a in soup.find_all('a', href=True):
             link_text = a.get_text(strip=True)
@@ -81,16 +83,32 @@ async def extract_job_details_with_ai(url: str):
                 if link_url.startswith("/"): continue 
                 important_links.append(f"{link_text} -> {link_url}")
 
-        page_text = soup.get_text(separator=' ', strip=True)[:3500] 
+        # 🚀 IMPROVEMENT 2: Retain Table Format. Har column ke beech mein ' | ' lagaya hai 
+        # Taki AI ko samajh aaye ki yeh table ka data hai (jaise screenshot mein Trade Name | ITI | Diploma)
+        for table in soup.find_all("table"):
+            for tr in table.find_all("tr"):
+                for td in tr.find_all(["td", "th"]):
+                    td.append(" | ")
+                tr.append("\n")
+                
+        # Faltu ke scripts aur styling hata dein taki text saaf rahe
+        for script in soup(["script", "style"]):
+            script.extract()
+
+        # 🚀 IMPROVEMENT 3: Increased text limit from 3500 to 15000. 
+        # Ab page ke last tak ki sari details (Age limit, Vacancy table, Salary) capture hongi.
+        page_text = soup.get_text(separator=' ', strip=True)[:15000] 
         
         if important_links:
-            page_text += "\n\n--- IMPORTANT LINKS ---\n" + "\n".join(important_links[:15])
+            page_text += "\n\n--- IMPORTANT LINKS ---\n" + "\n".join(important_links[:20])
 
-        # 🚀 SMART TRICK: Ab AI State-wise, Trade-wise, Category-wise har table padhega!
         prompt = f"""
         Extract the following job details from the text below strictly in JSON format.
-        Pay close attention to tables. There might be State + Posts, Trade + Posts, or Category + Posts. 
-        If info is genuinely not found, write "NA".
+        CRITICAL INSTRUCTIONS: 
+        - Pay close attention to tables (data separated by '|'). 
+        - Extract Trade-wise (e.g., Fitter, Assistant) and Category-wise posts accurately.
+        - If info is genuinely not found, write "NA".
+        
         {{
           "post_name": "Main title of the recruitment (e.g. Junior Engineer, Clerk, Safai Karmchari, Nursing Officer, Manager, Assistant)",
           "organization": "Department or Company name (e.g. RRB, ISRO, UPPSC, AIIMS)",
@@ -140,7 +158,7 @@ async def extract_job_details_with_ai(url: str):
         Text: {page_text}
         """
         
-        await asyncio.sleep(4)
+        await asyncio.sleep(2)
         
         groq_url = "https://api.groq.com/openai/v1/chat/completions"
         headers = {
@@ -148,15 +166,18 @@ async def extract_job_details_with_ai(url: str):
             "Content-Type": "application/json"
         }
         payload = {
-            "model": "llama-3.1-8b-instant",
+            # 🚀 IMPROVEMENT 4: Switched to llama-3.3-70b-versatile. Yeh bada model hai jo tables ko 
+            # asani se samajh leta hai aur strict JSON return karta hai.
+            "model": "llama-3.3-70b-versatile",
             "messages": [
                 {"role": "system", "content": "You are a precise JSON data extractor. Understand synonyms carefully. Group State, Trade, Category, Vacancy, and Eligibility together properly. Always return valid JSON only."},
                 {"role": "user", "content": prompt}
             ],
-            "response_format": {"type": "json_object"}
+            "response_format": {"type": "json_object"},
+            "temperature": 0.1 # Very low temperature for highly accurate data extraction
         }
         
-        async with httpx.AsyncClient(timeout=20.0) as ai_client:
+        async with httpx.AsyncClient(timeout=30.0) as ai_client:
             ai_resp = await ai_client.post(groq_url, headers=headers, json=payload)
             if ai_resp.status_code != 200:
                 print(f"Groq API Error: {ai_resp.text}")
