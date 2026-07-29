@@ -346,7 +346,7 @@ async def refresh_jobs_task() -> None:
                     "salary": details.get("salary", "NA"),
                     "eligibility": details.get("eligibility", "NA") if details.get("eligibility", "NA") != "NA" else summary,
                     
-                    "category_vacancies": details.get("category_vacancies", {}),
+                    "category_vacancies": details.get("category_vacancies", []),
                     "multiple_posts": details.get("multiple_posts", []),
                     "salary_wise_post_name": details.get("salary_wise_post_name", []),
                     "state_wise_vacancies": details.get("state_wise_vacancies", []),
