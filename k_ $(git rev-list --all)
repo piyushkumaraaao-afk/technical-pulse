@@ -1,0 +1,47 @@
+[33mcommit 4eecc9759a70e3ab6f1f335cdc61b349cc984f22[m
+Author: piyushkumaraaao-afk <piyushkumaraaao@gmail.com>
+Date:   Fri Jul 24 12:20:35 2026 +0530
+
+    Updated AI logic for RSS Scraper
+
+[33mcommit 3fd83ed549a5219538894597c4b2140a8692f1d8[m
+Author: piyushkumaraaao-afk <piyushkumaraaao@gmail.com>
+Date:   Thu Jul 23 08:50:52 2026 +0530
+
+    Cleaned up code and secured API keys
+
+[33mcommit de425f9a3060eedcbd2a167a849de0e8a11c0e39[m
+Author: piyushkumaraaao-afk <piyushkumaraaao@gmail.com>
+Date:   Thu Jul 23 08:49:58 2026 +0530
+
+    Cleaned up code and secured API keys
+
+[33mcommit 85ebbea6e5de28802bf5585cf85592504bf2e5d5[m
+Author: piyushkumaraaao-afk <piyushkumaraaao@gmail.com>
+Date:   Thu Jul 23 08:42:51 2026 +0530
+
+    Fixed admin dashboard buttons for trending, premium, and block user
+
+[33mcommit 98a78e66034ac799addaa7e59574ed92195bbba0[m
+Author: piyushkumaraaao-afk <piyushkumaraaao@gmail.com>
+Date:   Mon Jul 13 16:45:47 2026 +0530
+
+    Fix Gemini model
+
+[33mcommit e8b6490af9ac185b98ef6654e596d882a9b63680[m
+Author: piyushkumaraaao-afk <piyushkumaraaao@gmail.com>
+Date:   Mon Jul 13 15:23:44 2026 +0530
+
+    Fixed AI chat code updated to Gemini 1.5 flash
+
+[33mcommit c8cc682b7caa1176e1f88d8020c3aa23912f2e04[m
+Author: piyushkumaraaao-afk <piyushkumaraaao@gmail.com>
+Date:   Sun Jul 12 00:07:51 2026 +0530
+
+    remove emergent and add mongo
+
+[33mcommit 6e866fbe7c137629c54c133e398960777bed85eb[m
+Author: Piyush Kumar <piyushkumaraaao@gmail.com>
+Date:   Sat Jul 11 21:21:19 2026 +0530
+
+    first commit
