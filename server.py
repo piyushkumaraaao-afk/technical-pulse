@@ -342,7 +342,7 @@ async def refresh_jobs_task() -> None:
                     "qualifications": fallback_qualifications(title, summary, details.get("qualifications", [])),
                     "branches": details.get("branches", []),
                     "vacancies": details.get("total_post", "NA"),
-                    "salary": details.get("salary", "pay_scale", "NA"),
+                    "salary": details.get("salary", "NA"),
                     "eligibility": details.get("eligibility", "NA") if details.get("eligibility", "NA") != "NA" else summary,
                     
                     "category_vacancies": details.get("category_vacancies", {}),
