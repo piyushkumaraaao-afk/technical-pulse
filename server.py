@@ -56,9 +56,6 @@ db = client[DB_NAME]
 _push_client = None
 
 
-# =======================
-# Constants & Configurations
-# =======================
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "llama-3.1-8b-instant" 
@@ -277,7 +274,9 @@ async def extract_job_details_with_ai(url: str) -> dict:
 # =======================
 # Main Processing Engine
 # =======================
-async def refresh_jobs_task() -> tuple[int, int]:
+async def refresh_jobs_task() -> None:
+    """Changed to return nothing, as it runs entirely in background now."""
+    print("Background Scraping Started...")
     added = 0
     today_str = date.today().isoformat()
 
@@ -369,7 +368,7 @@ async def refresh_jobs_task() -> tuple[int, int]:
                 added += 1
 
     print(f"✅ Scraping cycle finished! +{added} added, {removed} expired")
-    return added, removed
+
 
 
 # =======================
@@ -1132,9 +1131,17 @@ async def admin_delete_rss(src_id: str, admin: dict = Depends(require_admin)):
 
 
 @api.post("/admin/refresh-jobs")
-async def admin_refresh_jobs(admin: dict = Depends(require_admin)):
-    added, removed = await refresh_jobs_task()
-    return {"added": added, "removed": removed}
+async def admin_refresh_jobs(background_tasks: BackgroundTasks, admin: dict = Depends(require_admin)):
+    # Task background me daal diya (No 502 Error!)
+    background_tasks.add_task(refresh_jobs_task)
+    
+    # Turant 0 bhej diya taaki frontend crash/undefined na ho. 
+    # Asli data 5 min baad DB me khud update ho jayega.
+    return {
+        "added": 0, 
+        "removed": 0, 
+        "message": "Scraping has started in the background successfully."
+    }
 
 # =======================
 # Feedback & User Management 
