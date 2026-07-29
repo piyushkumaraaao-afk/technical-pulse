@@ -58,7 +58,7 @@ _push_client = None
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama-3.3-70b-versatile" 
+GROQ_MODEL = "llama-3.1-8b-instant" 
 
 ALLOWED_POST_TYPES = {
     "Job", "Admit Card", "Result", "Scholarship", "Apprenticeship",
@@ -202,9 +202,14 @@ async def extract_job_details_with_ai(url: str) -> dict:
     except Exception as e:
         print(f"Link extraction failed for {url}: {e}")
 
-    # 🚀 THE ULTIMATE "ALL POSSIBLE WORDS" PROMPT
+    # 🚀 AI PROMPT FIX: Admit Card/Result explicitly valid kiye hain!
     prompt = f"""
     You are an elite Data Extraction AI. Analyze the Markdown content and Links from a recruitment website.
+    
+    CRITICAL RULES - DO NOT IGNORE ADMIT CARDS & RESULTS:
+    - If the page is about an Admit Card, Result, Exam Date, or Scholarship, it is VALID. DO NOT choose "IGNORE". 
+    - Set the `post_type` to "Admit Card", "Result", "Upcoming Exam", or "Scholarship" accordingly.
+    - For these types, it is okay if Salary, Vacancies, or Age Limits are "NA". Just extract the Organization, Post Name, and Links!
     
     CRITICAL RULES - SYNONYMS TO LOOK FOR:
     1. Organization: Look for 'Organization', 'Company', 'Board', 'Commission', 'Institution', 'Employer', 'Conducted By', 'Recruitment Board', 'Bank'.
@@ -218,18 +223,18 @@ async def extract_job_details_with_ai(url: str) -> dict:
     9. Location: Look for 'Job Location', 'Posting', 'Place of Posting', 'State', 'City', 'All India'.
     10. Category/State Vacancies: Look for 'UR', 'Gen', 'Unreserved', 'OBC', 'EWS', 'SC', 'ST', 'PwD', 'Ex-Servicemen' or state names.
 
-    JSON SCHEMA TO RETURN (Strictly use these keys, map the synonyms to these keys):
+    JSON SCHEMA TO RETURN (Strictly use these keys):
     {{
       "post_name": "Exact extracted Title/Role",
       "organization": "Exact conducting body/company",
       "category": "Choose ONE: ['Government', 'PSU', 'Private']",
       "post_type": "Choose ONE: ['Job', 'Admit Card', 'Result', 'Scholarship', 'Apprenticeship', 'Internship', 'Upcoming Exam', 'IGNORE']",
       "total_post": "Number only (e.g., 6557)",
-      "category_vacancies": [ {{ "post_name": "Specific Post Name OR Trade (e.g., Civil, Fitter)", "General": "NA", "OBC": "NA", "EWS": "NA", "SC": "NA", "ST": "NA" }} ],
+      "category_vacancies": [ {{ "post_name": "Specific Post Name OR Trade", "General": "NA", "OBC": "NA", "EWS": "NA", "SC": "NA", "ST": "NA" }} ],
       "state_wise_vacancies": [ {{ "state_name": "State", "vacancies": "Number" }} ],
-      "salary_wise_post_name":[ {{ "post_name": "Specific Post Name OR Trade (e.g., Civil, Fitter)", "salary": "Salary or Pay scale or Stipend" }} ],
+      "salary_wise_post_name":[ {{ "post_name": "Specific Post Name OR Trade", "salary": "Salary or Pay scale or Stipend" }} ],
       "multiple_posts": [
-         {{ "post_name": "Specific Post Name OR Trade (e.g., Civil, Fitter)", "vacancies": "Number", "eligibility": "Qualification for this specific post" }}
+         {{ "post_name": "Specific Post Name OR Trade", "vacancies": "Number", "eligibility": "Qualification for this specific post" }}
       ],
       "mode_of_selection": ["Array of stages"],
       "min_age": "Minimum age (number only)",
@@ -256,7 +261,7 @@ async def extract_job_details_with_ai(url: str) -> dict:
         payload = {
             "model": GROQ_MODEL,
             "messages": [
-                {"role": "system", "content": "You are a master data extractor. Understand synonyms carefully and map them to the exact JSON structure. Do NOT hallucinate."},
+                {"role": "system", "content": "You are a master data extractor. DO NOT ignore Admit Cards or Results just because salary/vacancy is missing."},
                 {"role": "user", "content": prompt}
             ],
             "response_format": {"type": "json_object"},
@@ -275,7 +280,6 @@ async def extract_job_details_with_ai(url: str) -> dict:
 # Main Processing Engine
 # =======================
 async def refresh_jobs_task() -> None:
-    """Changed to return nothing, as it runs entirely in background now."""
     print("Background Scraping Started...")
     added = 0
     today_str = date.today().isoformat()
@@ -309,18 +313,27 @@ async def refresh_jobs_task() -> None:
 
                 title, summary = entry["title"], entry["summary"]
                 title_type = detect_post_type(title)
+                
+                # Agar hamara title_type already IGNORE bol raha hai (jaise Answer Key), toh seedha chhod do
                 if title_type == "IGNORE":
                     continue
 
                 print(f"Deep scraping [{title_type}]: {title}")
                 details = await extract_job_details_with_ai(job_link)
                 
-                if details.get("post_type") == "IGNORE":
+                # 🚀 PYTHON FAILSAFE: Agar AI bewakoofi karke Result/Admit Card ko IGNORE kar de,
+                # Toh hum AI ki baat nahi manenge, aur apna 'title_type' use karke usko add kar lenge!
+                ai_post_type = details.get("post_type", "NA")
+                
+                if ai_post_type == "IGNORE" and title_type in ["Admit Card", "Result", "Scholarship", "Upcoming Exam"]:
+                    ai_post_type = title_type
+                    print(f"⚠️ Overriding AI: Saved as {title_type} instead of IGNORE.")
+                
+                if ai_post_type == "IGNORE":
+                    print(f"🚫 Properly Ignored: {title}")
                     continue
 
-                post_type = details.get("post_type", "NA")
-                if post_type not in ALLOWED_POST_TYPES or post_type == "NA":
-                    post_type = title_type
+                post_type = ai_post_type if ai_post_type in ALLOWED_POST_TYPES and ai_post_type != "NA" else title_type
 
                 post_name = details.get("post_name", "NA")
                 if post_name == "NA" or not post_name:
@@ -1132,16 +1145,12 @@ async def admin_delete_rss(src_id: str, admin: dict = Depends(require_admin)):
 
 @api.post("/admin/refresh-jobs")
 async def admin_refresh_jobs(background_tasks: BackgroundTasks, admin: dict = Depends(require_admin)):
-    # Task background me daal diya (No 502 Error!)
+    # Yeh task background me chalayega, jisse connection kabhi timeout/fail nahi hoga!
     background_tasks.add_task(refresh_jobs_task)
     
-    # Turant 0 bhej diya taaki frontend crash/undefined na ho. 
-    # Asli data 5 min baad DB me khud update ho jayega.
-    return {
-        "added": 0, 
-        "removed": 0, 
-        "message": "Scraping has started in the background successfully."
-    }
+    # Frontend ko 0 bhej do taaki 'undefined' na dikhe.
+    # Frontend par '+0 added' aayega, lekin backend parde ke piche saari jobs aaram se save kar dega.
+    return {"added": 0, "removed": 0}
 
 # =======================
 # Feedback & User Management 
