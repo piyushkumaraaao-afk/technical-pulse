@@ -211,7 +211,7 @@ async def extract_job_details_with_ai(url: str) -> dict:
     2. Post Name: Look for 'Post Name', 'Designation', 'Job Title', 'Position', 'Role', 'Name of the Post', 'Trade Name', 'Apprentice'.
     3. Salary: Look for 'Salary', 'Pay Scale', 'Stipend', 'Remuneration', 'CTC', 'Pay Level', 'Pay Matrix', 'Earnings', 'Wages', 'In Hand'.
     4. Age Limit: Look for 'Age Limit', 'Minimum Age', 'Maximum Age', 'Age as on', 'Age Relaxation', 'Umar', 'Ayoo'. (Extract MAX absolute age).
-    5. Total Posts: Look for 'Total Vacancies', 'No. of Posts', 'Total Posts', 'Number of Vacancies', 'Seat', 'Openings', 'Capacity'.
+    5. Total Post: Look for 'Total Vacancies', 'No. of Post', 'Total Post', 'Number of Vacancies', 'Seat', 'Openings', 'Capacity'.
     6. Selection Process: Look for 'Selection Process', 'Recruitment Process', 'Exam Pattern', 'Stage', 'CBT', 'Written Exam', 'Interview', 'Physical', 'PET', 'PST', 'Skill Test', 'Document Verification', 'Medical'.
     7. Last Date: Look for 'Last Date', 'Apply Online Last Date', 'Closing Date', 'Deadline', 'Registration End Date', 'Antim Tithi', 'Valid Till'. (Format as YYYY-MM-DD).
     8. Qualifications: Look for 'Education Qualification', 'Eligibility', 'Academic Criteria', 'Essential Qualification', 'Passed', 'Degree', 'Diploma', 'ITI', '10th', '12th', 'B.Tech', 'Graduation'.
@@ -224,13 +224,13 @@ async def extract_job_details_with_ai(url: str) -> dict:
       "organization": "Exact conducting body/company",
       "category": "Choose ONE: ['Government', 'PSU', 'Private']",
       "post_type": "Choose ONE: ['Job', 'Admit Card', 'Result', 'Scholarship', 'Apprenticeship', 'Internship', 'Upcoming Exam', 'IGNORE']",
-      "total_posts": "Number only (e.g., 6557)",
+      "total_post": "Number only (e.g., 6557)",
       "category_vacancies": {{ "General": "NA", "OBC": "NA", "EWS": "NA", "SC": "NA", "ST": "NA" }},
       "state_wise_vacancies": [ {{ "state_name": "State", "vacancies": "Number" }} ],
       "multiple_posts": [
          {{ "post_name": "Specific Post Name OR Trade (e.g., Civil, Fitter)", "vacancies": "Number", "eligibility": "Qualification for this specific post" }}
       ],
-      "mode_of_selection": ["Array of stages"],
+      "Mode_of_Selection": ["Array of stages"],
       "min_age": "Minimum age (number only)",
       "max_age": "Maximum age (number only)",
       "pay_scale": "Pay scale range or NA",
@@ -342,7 +342,7 @@ async def refresh_jobs_task() -> None:
                     
                     "qualifications": fallback_qualifications(title, summary, details.get("qualifications", [])),
                     "branches": details.get("branches", []),
-                    "vacancies": details.get("total_posts", "NA"),
+                    "vacancies": details.get("total_post", "NA"),
                     "pay_scale": details.get("pay_scale", "NA"),
                     "salary": details.get("salary", "NA"),
                     "eligibility": details.get("eligibility", "NA") if details.get("eligibility", "NA") != "NA" else summary,
