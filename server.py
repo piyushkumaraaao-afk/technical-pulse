@@ -1196,7 +1196,7 @@ async def startup_event():
     _push_client = httpx.AsyncClient(base_url="https://push-service-placeholder.com")
     await seed_admin()
     # 🚀 Yahan purane naam ko naye background engine se replace kar diya gaya hai
-    scheduler.add_job(background_scraping_engine, 'interval', hours=12)
+    scheduler.add_job(refresh_jobs_task, 'interval', hours=12)
     scheduler.start()
     logger.info("CareerPulse Background Services Started Successfully")
 
