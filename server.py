@@ -1135,7 +1135,6 @@ async def admin_delete_rss(src_id: str, admin: dict = Depends(require_admin)):
 async def admin_refresh_jobs(admin: dict = Depends(require_admin)):
     added, removed = await refresh_jobs_task()
     return {"added": added, "removed": removed}
-    }
 
 # =======================
 # Feedback & User Management 
