@@ -105,7 +105,9 @@ from crawl4ai import AsyncWebCrawler
 # =======================
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama-3.1-8b-instant"
+# Llama 3.1 8B is smart, but 70B is even better for complex tables if you have access. 
+# We'll stick to 8b-instant but give it a highly optimized prompt.
+GROQ_MODEL = "llama-3.1-8b-instant" 
 
 ALLOWED_POST_TYPES = {
     "Job", "Admit Card", "Result", "Scholarship", "Apprenticeship",
@@ -143,6 +145,7 @@ def detect_post_type(title: str) -> str:
     if any(val in lower for val in ("exam date", "date sheet", "schedule")): return "Upcoming Exam"
     if "apprentice" in lower: return "Apprenticeship"
     if "internship" in lower: return "Internship"
+    if any(val in lower for val in ("admission", "counseling", "entrance")): return "IGNORE"
     return "Job"
 
 def looks_like_detail_link(url: str, title: str) -> bool:
@@ -163,13 +166,18 @@ def as_int_or_none(value: Any) -> int | None:
     return int(match.group()) if match else None
 
 def valid_iso_date(value: Any) -> str | None:
+    if not value or str(value).upper() == "NA":
+        return None
     try:
-        return date.fromisoformat(str(value)[:10]).isoformat()
+        # Match typical formats returned by AI or fallback to strict parsing
+        parsed_date = date.fromisoformat(str(value)[:10])
+        return parsed_date.isoformat()
     except (TypeError, ValueError):
         return None
 
 def fallback_qualifications(title: str, summary: str, qualifications: list) -> list:
-    if qualifications: return qualifications
+    if qualifications and len(qualifications) > 0 and qualifications[0] != "NA": 
+        return qualifications
     text = f"{title} {summary}".lower()
     found = []
     for phrase, label in (("12th", "12th"), ("intermediate", "12th"), ("iti", "ITI"), ("10th", "10th"), ("diploma", "Diploma"), ("graduate", "Graduate"), ("b.tech", "B.Tech"), ("btech", "B.Tech")):
@@ -177,7 +185,7 @@ def fallback_qualifications(title: str, summary: str, qualifications: list) -> l
     return found or ["Not Specified"]
 
 # =======================
-# Scrapers & AI Logic
+# Scrapers & Ultra-Smart AI Logic
 # =======================
 async def source_entries(src: dict, client: httpx.AsyncClient) -> list[dict]:
     response = await client.get(src["url"])
@@ -215,10 +223,11 @@ async def extract_job_details_with_ai(url: str) -> dict:
     page_text = ""
     links_text = ""
     
+    # 🚀 OVERSMART TRICK 1: 15,000 characters padhega taaki bottom ki table miss na ho!
     try:
         async with AsyncWebCrawler(verbose=False) as crawler:
             result = await crawler.arun(url=url, bypass_cache=True)
-            page_text = result.markdown[:4000] if result.markdown else ""
+            page_text = result.markdown[:15000] if result.markdown else "" 
     except Exception as e:
         print(f"Crawl4AI failed for {url}: {e}")
 
@@ -229,66 +238,79 @@ async def extract_job_details_with_ai(url: str) -> dict:
             soup = BeautifulSoup(response.text, 'html.parser')
             
             if not page_text:
-                page_text = soup.get_text(separator=' ', strip=True)[:4000]
+                # Extra cleanup for raw HTML fallback
+                for tag in soup(["script", "style", "nav", "footer"]): tag.decompose()
+                page_text = soup.get_text(separator=' | ', strip=True)[:15000]
 
             important_links = []
             for a in soup.find_all('a', href=True):
                 link_text = a.get_text(strip=True)[:100]
                 link_url = canonical_url(urljoin(url, a['href']))
-                if any(k in link_text.lower() for k in ['apply', 'register', 'login', 'notification', 'pdf', 'admit card', 'result']):
+                if any(k in link_text.lower() for k in ['apply', 'register', 'login', 'notification', 'pdf', 'admit card', 'result', 'official']):
                     if link_url.startswith(("http", "https")):
                         important_links.append(f"{link_text} -> {link_url}")
-            links_text = "\n".join(important_links[:15])
+            links_text = "\n".join(important_links[:20])
     except Exception as e:
         print(f"Link extraction failed for {url}: {e}")
 
+    # 🚀 OVERSMART TRICK 2: The Ultimate Brain Prompt
     prompt = f"""
-    Extract job details strictly in JSON. Use the provided text and links.
-    CRITICAL: Look carefully for ITI, Diploma, and Degree trade-wise vacancies in tables.
-    If info is genuinely not found, write "NA".
+    You are an elite JSON extraction AI. Analyze the Markdown content and Links from a recruitment website (like SarkariResult, Naukri, or FreeJobAlert).
     
+    STRICT RULES:
+    1. NEVER invent or hallucinate data. If a field is missing, write "NA".
+    2. LAST DATE: Find the EXACT "Apply Online Last Date", "Registration Deadline", or "Closing Date". Format as YYYY-MM-DD. DO NOT guess this.
+    3. TABLES (CRITICAL): Recruitment sites use complex tables. 
+       - If there is a table mapping 'Trade/Branch' (e.g. Fitter, Electrician, Civil) to 'Vacancies' and 'Eligibility', extract EACH row as an object in `multiple_posts`.
+       - If vacancies are divided by Category (UR, OBC, SC, ST, EWS), put them in `category_vacancies`.
+       - If vacancies are divided by State, map them in `state_wise_vacancies`.
+    4. LOCATION: Extract the job location (City/State/All India).
+
+    JSON SCHEMA:
     {{
-      "post_name": "Main title of the recruitment",
-      "organization": "Department or Company name",
-      "category": "Choose exactly ONE: ['Government', 'PSU', 'Private']",
-      "post_type": "Choose exactly ONE: ['Job', 'Admit Card', 'Result', 'Scholarship', 'Apprenticeship', 'Internship', 'Upcoming Exam', 'IGNORE']. Output 'IGNORE' for admissions.",
-      "total_posts": "Extract ONLY the numerical value of total vacancies.",
+      "post_name": "Main recruitment title",
+      "organization": "Company or Department",
+      "category": "Choose ONE: ['Government', 'PSU', 'Private']",
+      "post_type": "Choose ONE: ['Job', 'Admit Card', 'Result', 'Scholarship', 'Apprenticeship', 'Internship', 'Upcoming Exam', 'IGNORE']",
+      "total_posts": "Only the total number of vacancies (e.g., 6557)",
       "category_vacancies": {{ "General": "NA", "OBC": "NA", "EWS": "NA", "SC": "NA", "ST": "NA" }},
       "state_wise_vacancies": [ {{ "state_name": "State", "vacancies": "Number" }} ],
       "multiple_posts": [
-         {{ "post_name": "Specific post OR Trade Name", "vacancies": "Number of posts", "eligibility": "Eligibility criteria" }}
+         {{ "post_name": "Specific Post Name OR Trade (e.g., Technician, Civil, Fitter)", "vacancies": "Number of posts", "eligibility": "Exact eligibility criteria for this post/trade" }}
       ],
-      "mode_of_selection": ["Array of selection stages", "e.g. CBT", "Interview"],
-      "min_age": "Minimum age limit (number only) or NA",
-      "max_age": "Maximum age limit (number only) or NA",
-      "pay_scale": "Pay scale range or NA",
-      "salary": "Salary range or NA",
+      "mode_of_selection": ["Array of stages, e.g. CBT, Interview, Physical"],
+      "min_age": "Minimum age (number only)",
+      "max_age": "Maximum age (number only)",
+      "pay_scale": "Pay scale range",
+      "salary": "Salary (for private/Naukri jobs)",
       "qualifications": ["B.Tech", "Diploma", "10th Pass", "12th Pass", "ITI", "Graduate", "PG"],
       "branches": ["Computer Science", "Mechanical", "Civil", "Electrical", "Electronics", "Fitter", "Welder", "Electrician"],
-      "location": "City or state (or NA)",
-      "last_date": "YYYY-MM-DD if unambiguous else NA",
-      "check_official_notice": "Extract URL for 'Official Notification' or 'Download Notice' from LINKS.",
-      "apply_online_link": "Extract URL for 'Apply Online', 'Registration' from LINKS. If not found, write NA."
+      "location": "Job Location (City or State)",
+      "last_date": "YYYY-MM-DD (Exact apply last date. If not found, write NA)",
+      "check_official_notice": "Extract URL for 'Notification' or 'Download Notice' from LINKS.",
+      "apply_online_link": "Extract URL for 'Apply Online', 'Registration' from LINKS."
     }}
     
     --- DATA TO ANALYZE ---
     {page_text}
+    
     --- IMPORTANT LINKS ---
     {links_text}
     """
 
     try:
-        await asyncio.sleep(3)
+        await asyncio.sleep(2.5) # Protect Groq Rate Limits
         headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
         payload = {
             "model": GROQ_MODEL,
             "messages": [
-                {"role": "system", "content": "You are a precise JSON data extractor. Return ONLY valid JSON."},
+                {"role": "system", "content": "You are a master data extractor. Pay extreme attention to tables and dates. Return ONLY valid JSON."},
                 {"role": "user", "content": prompt}
             ],
-            "response_format": {"type": "json_object"}
+            "response_format": {"type": "json_object"},
+            "temperature": 0.1 # Low temperature for extreme accuracy
         }
-        async with httpx.AsyncClient(timeout=25.0) as ai_client:
+        async with httpx.AsyncClient(timeout=30.0) as ai_client: # Increased timeout for larger payload
             resp = await ai_client.post(GROQ_URL, headers=headers, json=payload)
             resp.raise_for_status()
             return first_json_object(resp.json()['choices'][0]['message']['content'])
@@ -303,6 +325,7 @@ async def refresh_jobs_task() -> tuple[int, int]:
     added = 0
     today_str = date.today().isoformat()
 
+    # Expire old jobs properly
     result = await db.jobs.update_many(
         {"is_active": True, "last_date": {"$type": "string", "$lt": today_str}},
         {"$set": {"is_active": False}},
@@ -339,7 +362,7 @@ async def refresh_jobs_task() -> tuple[int, int]:
                 details = await extract_job_details_with_ai(job_link)
                 
                 if details.get("post_type") == "IGNORE":
-                    print(f"🚫 Ignored by AI: {title}")
+                    print(f"🚫 Ignored by AI (Admission/Irrelevant): {title}")
                     continue
 
                 post_type = details.get("post_type", "NA")
@@ -347,11 +370,16 @@ async def refresh_jobs_task() -> tuple[int, int]:
                     post_type = title_type
 
                 post_name = details.get("post_name", "NA")
-                if post_name == "NA":
+                if post_name == "NA" or not post_name:
                     post_name = title
 
                 extracted_apply = details.get("apply_online_link", "NA")
                 action_link = extracted_apply if extracted_apply != "NA" else job_link
+                
+                # 🚀 OVERSMART TRICK 3: Exact Date Handling
+                # Agar AI ko date mil gayi toh perfect, nahi mili toh default expiry add karenge taaki UI crash na ho
+                exact_date = valid_iso_date(details.get("last_date"))
+                final_last_date = exact_date if exact_date else (date.today() + timedelta(days=30)).isoformat()
 
                 await db.jobs.insert_one({
                     "job_id": f"job_{uuid.uuid4().hex[:12]}",
@@ -360,22 +388,27 @@ async def refresh_jobs_task() -> tuple[int, int]:
                     "post_name": post_name,
                     "post_type": post_type,
                     "category": details.get("category", "NA") if details.get("category", "NA") != "NA" else src.get("default_category", "Government"),
+                    
                     "qualifications": fallback_qualifications(title, summary, details.get("qualifications", [])),
                     "branches": details.get("branches", []),
                     "vacancies": details.get("total_posts", "NA"),
                     "pay_scale": details.get("pay_scale", "NA"),
                     "salary": details.get("salary", "NA"),
                     "eligibility": details.get("eligibility", "NA") if details.get("eligibility", "NA") != "NA" else summary,
+                    
                     "category_vacancies": details.get("category_vacancies", {}),
                     "multiple_posts": details.get("multiple_posts", []),
                     "state_wise_vacancies": details.get("state_wise_vacancies", []),
                     "mode_of_selection": details.get("mode_of_selection", []),
                     "location": details.get("location", "NA"),
-                    "last_date": valid_iso_date(details.get("last_date")) or (date.today() + timedelta(days=30)).isoformat(),
+                    
+                    "last_date": final_last_date,
+                    "is_exact_date": bool(exact_date), # Frontend ko batane ke liye ki date real hai ya estimated
+                    
                     "notification_pdf": details.get("check_official_notice") if details.get("check_official_notice") != "NA" else None,
                     "apply_link": action_link,
-                    "min_age": as_int_or_none(details.get("min_age")) or 18,
-                    "max_age": as_int_or_none(details.get("max_age")) or 35,
+                    "min_age": as_int_or_none(details.get("min_age")),
+                    "max_age": as_int_or_none(details.get("max_age")),
                     "description": summary,
                     "is_active": True,
                     "source": f"scraper:{src['name']}",
