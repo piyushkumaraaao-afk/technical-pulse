@@ -19,6 +19,7 @@ import re
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 from crawl4ai import AsyncWebCrawler
 from urllib.parse import urljoin
+from fastapi import BackgroundTasks, APIRouter, Depends
 
 
 import jwt
@@ -35,39 +36,6 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
 
-def canonical_url(url: str) -> str:
-    """Duplicate URL check ko bulletproof banata hai (Removes UTM parameters)"""
-    parts = urlsplit(url.strip())
-    query = [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True)
-             if not key.lower().startswith(("utm_", "fbclid", "gclid"))]
-    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/") or "/",
-                       urlencode(query, doseq=True), ""))
-
-def as_int_or_none(value) -> int | None:
-    """'18 Years' me se sirf '18' nikalega, database crash nahi hoga"""
-    match = re.search(r"\d+", str(value))
-    return int(match.group()) if match else None
-
-def valid_iso_date(value) -> str | None:
-    """Fake date format detect karke MongoDB ko clean date dega"""
-    try:
-        return date.fromisoformat(str(value)[:10]).isoformat()
-    except (TypeError, ValueError):
-        return None
-
-def first_json_object(model_text: str) -> dict:
-    """AI ke kachre se sirf JSON nikalega"""
-    model_text = model_text.strip()
-    if model_text.startswith("```"):
-        model_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", model_text, flags=re.I)
-    try:
-        parsed = json.loads(model_text)
-    except json.JSONDecodeError:
-        start, end = model_text.find("{"), model_text.rfind("}")
-        if start < 0 or end <= start:
-            raise
-        parsed = json.loads(model_text[start:end + 1])
-    return parsed
 
 # Config
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
@@ -88,25 +56,11 @@ db = client[DB_NAME]
 _push_client = None
 
 
-import re
-import uuid
-import json
-import os
-import asyncio
-from datetime import date, datetime, timedelta, timezone
-from typing import Any
-from urllib.parse import urljoin, urlsplit, parse_qsl, urlencode, urlunsplit
-import httpx
-from bs4 import BeautifulSoup
-from crawl4ai import AsyncWebCrawler
-
 # =======================
 # Constants & Configurations
 # =======================
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-# Llama 3.1 8B is smart, but 70B is even better for complex tables if you have access. 
-# We'll stick to 8b-instant but give it a highly optimized prompt.
 GROQ_MODEL = "llama-3.1-8b-instant" 
 
 ALLOWED_POST_TYPES = {
@@ -166,12 +120,9 @@ def as_int_or_none(value: Any) -> int | None:
     return int(match.group()) if match else None
 
 def valid_iso_date(value: Any) -> str | None:
-    if not value or str(value).upper() == "NA":
-        return None
+    if not value or str(value).upper() == "NA": return None
     try:
-        # Match typical formats returned by AI or fallback to strict parsing
-        parsed_date = date.fromisoformat(str(value)[:10])
-        return parsed_date.isoformat()
+        return date.fromisoformat(str(value)[:10]).isoformat()
     except (TypeError, ValueError):
         return None
 
@@ -223,7 +174,7 @@ async def extract_job_details_with_ai(url: str) -> dict:
     page_text = ""
     links_text = ""
     
-    # 🚀 OVERSMART TRICK 1: 15,000 characters padhega taaki bottom ki table miss na ho!
+    # Extract Markdown with Crawl4AI (Best for nested ITI/Diploma/Trade tables)
     try:
         async with AsyncWebCrawler(verbose=False) as crawler:
             result = await crawler.arun(url=url, bypass_cache=True)
@@ -231,6 +182,7 @@ async def extract_job_details_with_ai(url: str) -> dict:
     except Exception as e:
         print(f"Crawl4AI failed for {url}: {e}")
 
+    # 🚀 Context-Aware Link Extraction (Solves the "Click Here" problem)
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         async with httpx.AsyncClient(timeout=15.0, headers=headers, follow_redirects=True) as client:
@@ -238,79 +190,81 @@ async def extract_job_details_with_ai(url: str) -> dict:
             soup = BeautifulSoup(response.text, 'html.parser')
             
             if not page_text:
-                # Extra cleanup for raw HTML fallback
                 for tag in soup(["script", "style", "nav", "footer"]): tag.decompose()
                 page_text = soup.get_text(separator=' | ', strip=True)[:15000]
 
             important_links = []
             for a in soup.find_all('a', href=True):
-                link_text = a.get_text(strip=True)[:100]
                 link_url = canonical_url(urljoin(url, a['href']))
-                if any(k in link_text.lower() for k in ['apply', 'register', 'login', 'notification', 'pdf', 'admit card', 'result', 'official']):
-                    if link_url.startswith(("http", "https")):
-                        important_links.append(f"{link_text} -> {link_url}")
+                if not link_url.startswith(("http", "https")): continue
+                
+                # Fetching the parent container text to give AI the context (e.g., "Apply Online: Click Here")
+                parent = a.find_parent(['tr', 'li', 'p', 'div'])
+                context_text = parent.get_text(separator=' ', strip=True)[:100] if parent else a.get_text(strip=True)[:100]
+                
+                if any(k in context_text.lower() for k in ['apply', 'register', 'login', 'notification', 'pdf', 'admit card', 'result', 'official']):
+                    important_links.append(f"Context: [{context_text}] -> URL: {link_url}")
             links_text = "\n".join(important_links[:20])
     except Exception as e:
         print(f"Link extraction failed for {url}: {e}")
 
-    # 🚀 OVERSMART TRICK 2: The Ultimate Brain Prompt
+    # The Mastermind Prompt
     prompt = f"""
     You are an elite JSON extraction AI. Analyze the Markdown content and Links from a recruitment website (like SarkariResult, Naukri, or FreeJobAlert).
     
-    STRICT RULES:
-    1. NEVER invent or hallucinate data. If a field is missing, write "NA".
-    2. LAST DATE: Find the EXACT "Apply Online Last Date", "Registration Deadline", or "Closing Date". Format as YYYY-MM-DD. DO NOT guess this.
-    3. TABLES (CRITICAL): Recruitment sites use complex tables. 
-       - If there is a table mapping 'Trade/Branch' (e.g. Fitter, Electrician, Civil) to 'Vacancies' and 'Eligibility', extract EACH row as an object in `multiple_posts`.
-       - If vacancies are divided by Category (UR, OBC, SC, ST, EWS), put them in `category_vacancies`.
-       - If vacancies are divided by State, map them in `state_wise_vacancies`.
-    4. LOCATION: Extract the job location (City/State/All India).
+    STRICT RULES & CHAIN OF THOUGHT:
+    1. NEVER invent data. Write "NA" if missing.
+    2. LINKS: Look at the "Context" provided in the links section. If context says "Apply Online", map that URL to `apply_online_link`. If it says "Download Notification", map to `check_official_notice`.
+    3. TABLES: Merge multiple tables mentally. If Vacancies are in one table and Eligibility in another, merge them by Post Name into `multiple_posts`. 
+       - Include Trade/Branch (Fitter, Civil, etc.) inside the post name if applicable.
+    4. AGE LIMITS: If multiple max ages exist (e.g. 30 for Gr-III, 33 for Gr-I), set `max_age` to the highest absolute number (e.g., 33).
+    5. EXACT DATE: Extract the "Apply Online Last Date". Do not guess. Format YYYY-MM-DD.
 
     JSON SCHEMA:
     {{
       "post_name": "Main recruitment title",
-      "organization": "Company or Department",
+      "organization": "Company or Department (e.g. ONGC, Indian Navy, PNB)",
       "category": "Choose ONE: ['Government', 'PSU', 'Private']",
       "post_type": "Choose ONE: ['Job', 'Admit Card', 'Result', 'Scholarship', 'Apprenticeship', 'Internship', 'Upcoming Exam', 'IGNORE']",
       "total_posts": "Only the total number of vacancies (e.g., 6557)",
       "category_vacancies": {{ "General": "NA", "OBC": "NA", "EWS": "NA", "SC": "NA", "ST": "NA" }},
       "state_wise_vacancies": [ {{ "state_name": "State", "vacancies": "Number" }} ],
       "multiple_posts": [
-         {{ "post_name": "Specific Post Name OR Trade (e.g., Technician, Civil, Fitter)", "vacancies": "Number of posts", "eligibility": "Exact eligibility criteria for this post/trade" }}
+         {{ "post_name": "Specific Post Name OR Trade", "vacancies": "Number of posts", "eligibility": "Exact eligibility criteria" }}
       ],
-      "mode_of_selection": ["Array of stages, e.g. CBT, Interview, Physical"],
+      "mode_of_selection": ["Array of stages, e.g. CBT, Interview"],
       "min_age": "Minimum age (number only)",
       "max_age": "Maximum age (number only)",
       "pay_scale": "Pay scale range",
-      "salary": "Salary (for private/Naukri jobs)",
+      "salary": "Salary (important for Naukri/Private jobs)",
       "qualifications": ["B.Tech", "Diploma", "10th Pass", "12th Pass", "ITI", "Graduate", "PG"],
       "branches": ["Computer Science", "Mechanical", "Civil", "Electrical", "Electronics", "Fitter", "Welder", "Electrician"],
       "location": "Job Location (City or State)",
-      "last_date": "YYYY-MM-DD (Exact apply last date. If not found, write NA)",
-      "check_official_notice": "Extract URL for 'Notification' or 'Download Notice' from LINKS.",
-      "apply_online_link": "Extract URL for 'Apply Online', 'Registration' from LINKS."
+      "last_date": "YYYY-MM-DD (Exact apply last date. Write NA if absolutely not found)",
+      "check_official_notice": "Exact Notification URL from LINKS.",
+      "apply_online_link": "Exact Apply URL from LINKS."
     }}
     
     --- DATA TO ANALYZE ---
     {page_text}
     
-    --- IMPORTANT LINKS ---
+    --- IMPORTANT LINKS WITH CONTEXT ---
     {links_text}
     """
 
     try:
-        await asyncio.sleep(2.5) # Protect Groq Rate Limits
+        await asyncio.sleep(2) # Protect Groq Rate Limits
         headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
         payload = {
             "model": GROQ_MODEL,
             "messages": [
-                {"role": "system", "content": "You are a master data extractor. Pay extreme attention to tables and dates. Return ONLY valid JSON."},
+                {"role": "system", "content": "You are a master data extractor. Pay extreme attention to context links and table structures. Return ONLY valid JSON."},
                 {"role": "user", "content": prompt}
             ],
             "response_format": {"type": "json_object"},
-            "temperature": 0.1 # Low temperature for extreme accuracy
+            "temperature": 0.1 
         }
-        async with httpx.AsyncClient(timeout=30.0) as ai_client: # Increased timeout for larger payload
+        async with httpx.AsyncClient(timeout=30.0) as ai_client:
             resp = await ai_client.post(GROQ_URL, headers=headers, json=payload)
             resp.raise_for_status()
             return first_json_object(resp.json()['choices'][0]['message']['content'])
@@ -319,9 +273,11 @@ async def extract_job_details_with_ai(url: str) -> dict:
         return {"post_type": "NA"}
 
 # =======================
-# Main Processing Task
+# Main Processing Engine (Runs in Background)
 # =======================
-async def refresh_jobs_task() -> tuple[int, int]:
+async def background_scraping_engine():
+    """Yeh function ab background mein chalega. No more 502/524 Error!"""
+    print("Starting background scraping engine...")
     added = 0
     today_str = date.today().isoformat()
 
@@ -376,8 +332,7 @@ async def refresh_jobs_task() -> tuple[int, int]:
                 extracted_apply = details.get("apply_online_link", "NA")
                 action_link = extracted_apply if extracted_apply != "NA" else job_link
                 
-                # 🚀 OVERSMART TRICK 3: Exact Date Handling
-                # Agar AI ko date mil gayi toh perfect, nahi mili toh default expiry add karenge taaki UI crash na ho
+                # 🚀 Accurate Date Mapping
                 exact_date = valid_iso_date(details.get("last_date"))
                 final_last_date = exact_date if exact_date else (date.today() + timedelta(days=30)).isoformat()
 
@@ -403,7 +358,7 @@ async def refresh_jobs_task() -> tuple[int, int]:
                     "location": details.get("location", "NA"),
                     
                     "last_date": final_last_date,
-                    "is_exact_date": bool(exact_date), # Frontend ko batane ke liye ki date real hai ya estimated
+                    "is_exact_date": bool(exact_date), 
                     
                     "notification_pdf": details.get("check_official_notice") if details.get("check_official_notice") != "NA" else None,
                     "apply_link": action_link,
@@ -416,8 +371,7 @@ async def refresh_jobs_task() -> tuple[int, int]:
                 })
                 added += 1
 
-    print(f"Refresh jobs complete: +{added} added, {removed} expired")
-    return added, removed
+    print(f"✅ Scraping cycle finished! +{added} added, {removed} expired")
 
 # =======================
 # Pydantic Models
@@ -1179,11 +1133,17 @@ async def admin_delete_rss(src_id: str, admin: dict = Depends(require_admin)):
 
 
 @api.post("/admin/refresh-jobs")
-async def admin_refresh_jobs(admin: dict = Depends(require_admin)):
-    # 🚀 FIX: Background task hata diya hai. 
-    # Ab yeh pehle ki tarah pura wait karega aur frontend ko exact Added/Removed jobs batayega.
-    added, removed = await refresh_jobs_task()
-    return {"added": added, "removed": removed}
+async def admin_refresh_jobs(background_tasks: BackgroundTasks, admin: dict = Depends(require_admin)):
+    """
+    Ab API browser ko immediately success bhej degi, 
+    aur scraping background mein chalti rahegi! No Timeout!
+    """
+    background_tasks.add_task(background_scraping_engine)
+    return {
+        "status": "success", 
+        "message": "Scraping has started in the background. Please check the database in a few minutes.",
+        "note": "502 error is now permanently fixed!"
+    }
 
 # =======================
 # Feedback & User Management 
