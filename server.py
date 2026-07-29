@@ -225,8 +225,9 @@ async def extract_job_details_with_ai(url: str) -> dict:
       "category": "Choose ONE: ['Government', 'PSU', 'Private']",
       "post_type": "Choose ONE: ['Job', 'Admit Card', 'Result', 'Scholarship', 'Apprenticeship', 'Internship', 'Upcoming Exam', 'IGNORE']",
       "total_post": "Number only (e.g., 6557)",
-      "category_vacancies": {{ "General": "NA", "OBC": "NA", "EWS": "NA", "SC": "NA", "ST": "NA" }},
+      "category_vacancies": [ {{ "post_name": "Specific Post Name OR Trade (e.g., Civil, Fitter)", "General": "NA", "OBC": "NA", "EWS": "NA", "SC": "NA", "ST": "NA" }} ],
       "state_wise_vacancies": [ {{ "state_name": "State", "vacancies": "Number" }} ],
+      "salary_wise_post_name":[ {{ "post_name": "Specific Post Name OR Trade (e.g., Civil, Fitter)", "salary": "Salary or Pay scale or Stipend" }} ],
       "multiple_posts": [
          {{ "post_name": "Specific Post Name OR Trade (e.g., Civil, Fitter)", "vacancies": "Number", "eligibility": "Qualification for this specific post" }}
       ],
@@ -347,6 +348,7 @@ async def refresh_jobs_task() -> None:
                     
                     "category_vacancies": details.get("category_vacancies", {}),
                     "multiple_posts": details.get("multiple_posts", []),
+                    "salary_wise_post_name": details.get("salary_wise_post_name", []),
                     "state_wise_vacancies": details.get("state_wise_vacancies", []),
                     "mode_of_selection": details.get("mode_of_selection", []),
                     "location": details.get("location", "NA"),
