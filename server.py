@@ -81,7 +81,7 @@ def first_json_object(model_text: str) -> dict:
         start, end = model_text.find("{"), model_text.rfind("}")
         if start >= 0 and end > start:
             return json.loads(model_text[start:end + 1])
-        raise ValueError("No valid JSON found in AI response")
+        return {}
 
 def canonical_url(url: str) -> str:
     parts = urlsplit(url.strip())
@@ -174,7 +174,6 @@ async def extract_job_details_with_ai(url: str) -> dict:
     page_text = ""
     links_text = ""
     
-    # Extract Markdown with Crawl4AI (Best for nested ITI/Diploma/Trade tables)
     try:
         async with AsyncWebCrawler(verbose=False) as crawler:
             result = await crawler.arun(url=url, bypass_cache=True)
@@ -182,7 +181,6 @@ async def extract_job_details_with_ai(url: str) -> dict:
     except Exception as e:
         print(f"Crawl4AI failed for {url}: {e}")
 
-    # 🚀 Context-Aware Link Extraction (Solves the "Click Here" problem)
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         async with httpx.AsyncClient(timeout=15.0, headers=headers, follow_redirects=True) as client:
@@ -198,49 +196,52 @@ async def extract_job_details_with_ai(url: str) -> dict:
                 link_url = canonical_url(urljoin(url, a['href']))
                 if not link_url.startswith(("http", "https")): continue
                 
-                # Fetching the parent container text to give AI the context (e.g., "Apply Online: Click Here")
                 parent = a.find_parent(['tr', 'li', 'p', 'div'])
                 context_text = parent.get_text(separator=' ', strip=True)[:100] if parent else a.get_text(strip=True)[:100]
                 
-                if any(k in context_text.lower() for k in ['apply', 'register', 'login', 'notification', 'pdf', 'admit card', 'result', 'official']):
+                if any(k in context_text.lower() for k in ['apply', 'register', 'login', 'notification', 'pdf', 'admit card', 'result', 'official', 'click here']):
                     important_links.append(f"Context: [{context_text}] -> URL: {link_url}")
             links_text = "\n".join(important_links[:20])
     except Exception as e:
         print(f"Link extraction failed for {url}: {e}")
 
-    # The Mastermind Prompt
+    # 🚀 THE ULTIMATE "ALL POSSIBLE WORDS" PROMPT
     prompt = f"""
-    You are an elite JSON extraction AI. Analyze the Markdown content and Links from a recruitment website (like SarkariResult, Naukri, or FreeJobAlert).
+    You are an elite Data Extraction AI. Analyze the Markdown content and Links from a recruitment website.
     
-    STRICT RULES & CHAIN OF THOUGHT:
-    1. NEVER invent data. Write "NA" if missing.
-    2. LINKS: Look at the "Context" provided in the links section. If context says "Apply Online", map that URL to `apply_online_link`. If it says "Download Notification", map to `check_official_notice`.
-    3. TABLES: Merge multiple tables mentally. If Vacancies are in one table and Eligibility in another, merge them by Post Name into `multiple_posts`. 
-       - Include Trade/Branch (Fitter, Civil, etc.) inside the post name if applicable.
-    4. AGE LIMITS: If multiple max ages exist (e.g. 30 for Gr-III, 33 for Gr-I), set `max_age` to the highest absolute number (e.g., 33).
-    5. EXACT DATE: Extract the "Apply Online Last Date". Do not guess. Format YYYY-MM-DD.
+    CRITICAL RULES - SYNONYMS TO LOOK FOR:
+    1. Organization: Look for 'Organization', 'Company', 'Board', 'Commission', 'Institution', 'Employer', 'Conducted By', 'Recruitment Board', 'Bank'.
+    2. Post Name: Look for 'Post Name', 'Designation', 'Job Title', 'Position', 'Role', 'Name of the Post', 'Trade Name', 'Apprentice'.
+    3. Salary: Look for 'Salary', 'Pay Scale', 'Stipend', 'Remuneration', 'CTC', 'Pay Level', 'Pay Matrix', 'Earnings', 'Wages', 'In Hand'.
+    4. Age Limit: Look for 'Age Limit', 'Minimum Age', 'Maximum Age', 'Age as on', 'Age Relaxation', 'Umar', 'Ayoo'. (Extract MAX absolute age).
+    5. Total Posts: Look for 'Total Vacancies', 'No. of Posts', 'Total Posts', 'Number of Vacancies', 'Seat', 'Openings', 'Capacity'.
+    6. Selection Process: Look for 'Selection Process', 'Recruitment Process', 'Exam Pattern', 'Stage', 'CBT', 'Written Exam', 'Interview', 'Physical', 'PET', 'PST', 'Skill Test', 'Document Verification', 'Medical'.
+    7. Last Date: Look for 'Last Date', 'Apply Online Last Date', 'Closing Date', 'Deadline', 'Registration End Date', 'Antim Tithi', 'Valid Till'. (Format as YYYY-MM-DD).
+    8. Qualifications: Look for 'Education Qualification', 'Eligibility', 'Academic Criteria', 'Essential Qualification', 'Passed', 'Degree', 'Diploma', 'ITI', '10th', '12th', 'B.Tech', 'Graduation'.
+    9. Location: Look for 'Job Location', 'Posting', 'Place of Posting', 'State', 'City', 'All India'.
+    10. Category/State Vacancies: Look for 'UR', 'Gen', 'Unreserved', 'OBC', 'EWS', 'SC', 'ST', 'PwD', 'Ex-Servicemen' or state names.
 
-    JSON SCHEMA:
+    JSON SCHEMA TO RETURN (Strictly use these keys, map the synonyms to these keys):
     {{
-      "post_name": "Main recruitment title",
-      "organization": "Company or Department (e.g. ONGC, Indian Navy, PNB)",
+      "post_name": "Exact extracted Title/Role",
+      "organization": "Exact conducting body/company",
       "category": "Choose ONE: ['Government', 'PSU', 'Private']",
       "post_type": "Choose ONE: ['Job', 'Admit Card', 'Result', 'Scholarship', 'Apprenticeship', 'Internship', 'Upcoming Exam', 'IGNORE']",
-      "total_posts": "Only the total number of vacancies (e.g., 6557)",
+      "total_posts": "Number only (e.g., 6557)",
       "category_vacancies": {{ "General": "NA", "OBC": "NA", "EWS": "NA", "SC": "NA", "ST": "NA" }},
       "state_wise_vacancies": [ {{ "state_name": "State", "vacancies": "Number" }} ],
       "multiple_posts": [
-         {{ "post_name": "Specific Post Name OR Trade", "vacancies": "Number of posts", "eligibility": "Exact eligibility criteria" }}
+         {{ "post_name": "Specific Post Name OR Trade (e.g., Civil, Fitter)", "vacancies": "Number", "eligibility": "Qualification for this specific post" }}
       ],
-      "mode_of_selection": ["Array of stages, e.g. CBT, Interview"],
+      "mode_of_selection": ["Array of stages"],
       "min_age": "Minimum age (number only)",
       "max_age": "Maximum age (number only)",
-      "pay_scale": "Pay scale range",
-      "salary": "Salary (important for Naukri/Private jobs)",
+      "pay_scale": "Pay scale range or NA",
+      "salary": "Salary or Stipend or NA",
       "qualifications": ["B.Tech", "Diploma", "10th Pass", "12th Pass", "ITI", "Graduate", "PG"],
       "branches": ["Computer Science", "Mechanical", "Civil", "Electrical", "Electronics", "Fitter", "Welder", "Electrician"],
-      "location": "Job Location (City or State)",
-      "last_date": "YYYY-MM-DD (Exact apply last date. Write NA if absolutely not found)",
+      "location": "City or State",
+      "last_date": "YYYY-MM-DD",
       "check_official_notice": "Exact Notification URL from LINKS.",
       "apply_online_link": "Exact Apply URL from LINKS."
     }}
@@ -253,12 +254,12 @@ async def extract_job_details_with_ai(url: str) -> dict:
     """
 
     try:
-        await asyncio.sleep(2) # Protect Groq Rate Limits
+        await asyncio.sleep(2) 
         headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
         payload = {
             "model": GROQ_MODEL,
             "messages": [
-                {"role": "system", "content": "You are a master data extractor. Pay extreme attention to context links and table structures. Return ONLY valid JSON."},
+                {"role": "system", "content": "You are a master data extractor. Understand synonyms carefully and map them to the exact JSON structure. Do NOT hallucinate."},
                 {"role": "user", "content": prompt}
             ],
             "response_format": {"type": "json_object"},
@@ -272,16 +273,14 @@ async def extract_job_details_with_ai(url: str) -> dict:
         print(f"Groq Extraction Error for {url}: {e}")
         return {"post_type": "NA"}
 
+
 # =======================
-# Main Processing Engine (Runs in Background)
+# Main Processing Engine
 # =======================
-async def background_scraping_engine():
-    """Yeh function ab background mein chalega. No more 502/524 Error!"""
-    print("Starting background scraping engine...")
+async def refresh_jobs_task() -> tuple[int, int]:
     added = 0
     today_str = date.today().isoformat()
 
-    # Expire old jobs properly
     result = await db.jobs.update_many(
         {"is_active": True, "last_date": {"$type": "string", "$lt": today_str}},
         {"$set": {"is_active": False}},
@@ -318,7 +317,6 @@ async def background_scraping_engine():
                 details = await extract_job_details_with_ai(job_link)
                 
                 if details.get("post_type") == "IGNORE":
-                    print(f"🚫 Ignored by AI (Admission/Irrelevant): {title}")
                     continue
 
                 post_type = details.get("post_type", "NA")
@@ -332,7 +330,6 @@ async def background_scraping_engine():
                 extracted_apply = details.get("apply_online_link", "NA")
                 action_link = extracted_apply if extracted_apply != "NA" else job_link
                 
-                # 🚀 Accurate Date Mapping
                 exact_date = valid_iso_date(details.get("last_date"))
                 final_last_date = exact_date if exact_date else (date.today() + timedelta(days=30)).isoformat()
 
@@ -372,6 +369,8 @@ async def background_scraping_engine():
                 added += 1
 
     print(f"✅ Scraping cycle finished! +{added} added, {removed} expired")
+    return added, removed
+
 
 # =======================
 # Pydantic Models
@@ -1133,16 +1132,9 @@ async def admin_delete_rss(src_id: str, admin: dict = Depends(require_admin)):
 
 
 @api.post("/admin/refresh-jobs")
-async def admin_refresh_jobs(background_tasks: BackgroundTasks, admin: dict = Depends(require_admin)):
-    """
-    Ab API browser ko immediately success bhej degi, 
-    aur scraping background mein chalti rahegi! No Timeout!
-    """
-    background_tasks.add_task(background_scraping_engine)
-    return {
-        "status": "success", 
-        "message": "Scraping has started in the background. Please check the database in a few minutes.",
-        "note": "502 error is now permanently fixed!"
+async def admin_refresh_jobs(admin: dict = Depends(require_admin)):
+    added, removed = await refresh_jobs_task()
+    return {"added": added, "removed": removed}
     }
 
 # =======================
