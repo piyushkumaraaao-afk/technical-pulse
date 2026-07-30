@@ -7,6 +7,9 @@ import feedparser
 import requests
 import json
 import httpx
+import hashlib
+import pandas as pd
+from collection import defaultdict
 from bs4 import BeautifulSoup
 from pathlib import Path
 from datetime import datetime, timedelta, timezone, date
@@ -58,7 +61,7 @@ _push_client = None
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama3.1-8b-instant" 
+GROQ_MODEL = "llama-3.3-70b-versatile" 
 
 ALLOWED_POST_TYPES = {
     "Job", "Admit Card", "Result", "Scholarship", "Apprenticeship",
@@ -68,6 +71,11 @@ ALLOWED_POST_TYPES = {
 # =======================
 # Bulletproof Helper Functions
 # =======================
+
+def generate_content_hash(title: str, organization: str, link: str) -> str:
+    content = f"{title}|{organization}|{link}".lower().strip()
+    return hashlib.sha256(content.encode()).hexdigest()
+
 def first_json_object(model_text: str) -> dict:
     model_text = model_text.strip()
     if model_text.startswith("```"):
@@ -132,6 +140,14 @@ def fallback_qualifications(title: str, summary: str, qualifications: list) -> l
         if phrase in text and label not in found: found.append(label)
     return found or ["Not Specified"]
 
+def generate_content_hash(
+    organization: str,
+    post_name: str,
+    last_date: str
+) -> str:
+    text = f"{organization}|{post_name}|{last_date}"
+    return hashlib.sha256(text.lower().encode()).hexdigest()    
+
 # =======================
 # Scrapers & Ultra-Smart AI Logic
 # =======================
@@ -166,6 +182,23 @@ async def source_entries(src: dict, client: httpx.AsyncClient) -> list[dict]:
         entries.append({"title": title, "link": link, "summary": f"Latest notification on {src['name']}."})
         if len(entries) >= 40: break
     return entries
+def extract_tables_as_json(html: str) -> list:
+    tables = []
+
+    try:
+        dfs = pd.read_html(html)
+
+        for df in dfs[:10]:
+            try:
+                df = df.fillna("NA")
+                tables.append(df.to_dict("records"))
+            except:
+                pass
+
+    except Exception:
+        pass
+
+    return tables    
 
 async def extract_job_details_with_ai(url: str) -> dict:
     page_text = ""
@@ -174,7 +207,7 @@ async def extract_job_details_with_ai(url: str) -> dict:
     try:
         async with AsyncWebCrawler(verbose=False) as crawler:
             result = await crawler.arun(url=url, bypass_cache=True)
-            page_text = result.markdown[:15000] if result.markdown else "" 
+            page_text = result.markdown[:6000] if result.markdown else "" 
     except Exception as e:
         print(f"Crawl4AI failed for {url}: {e}")
 
@@ -183,6 +216,7 @@ async def extract_job_details_with_ai(url: str) -> dict:
         async with httpx.AsyncClient(timeout=15.0, headers=headers, follow_redirects=True) as client:
             response = await client.get(url)
             soup = BeautifulSoup(response.text, 'html.parser')
+            table_json = extract_tables_as_json(response.text)
             
             if not page_text:
                 # 🚀 BIG FIX HERE: HTML Tables ko pipe (|) formate mein convert kar rahe hain
@@ -194,7 +228,7 @@ async def extract_job_details_with_ai(url: str) -> dict:
                         tr.append("\n")
                 
                 for tag in soup(["script", "style", "nav", "footer"]): tag.decompose()
-                page_text = soup.get_text(separator=' ', strip=True)[:15000]
+                page_text = soup.get_text(separator=' ', strip=True)[:6000]
 
             important_links = []
             for a in soup.find_all('a', href=True):
@@ -262,10 +296,12 @@ async def extract_job_details_with_ai(url: str) -> dict:
     
     --- IMPORTANT LINKS WITH CONTEXT ---
     {links_text}
+    --- STRUCTURED TABLE DATA ---
+    {json.dumps(table_json)[:4000]}
     """
 
     try:
-        await asyncio.sleep(4) 
+        await asyncio.sleep(1) 
         headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
         payload = {
             "model": GROQ_MODEL,
@@ -313,11 +349,17 @@ async def refresh_jobs_task() -> None:
 
             for entry in entries:
                 job_link = canonical_url(entry["link"])
-                existing = await db.jobs.find_one(
-                    {"$or": [{"source_url": job_link}, {"apply_link": job_link}]},
-                    {"_id": 1},
+                content_hash = generate_content_hash(
+                    entry["title"],
+                    job_link
                 )
-                if existing:
+                
+                duplicate = await db.jobs.find_one(
+                    {"content_hash": content_hash},
+                    {"_id": 1}
+                )
+
+                if duplicate:
                     continue
 
                 title, summary = entry["title"], entry["summary"]
@@ -356,6 +398,7 @@ async def refresh_jobs_task() -> None:
 
                 await db.jobs.insert_one({
                     "job_id": f"job_{uuid.uuid4().hex[:12]}",
+                    "content_hash": content_hash,
                     "source_url": job_link,
                     "organization": details.get("organization", "NA") if details.get("organization", "NA") != "NA" else src["name"],
                     "post_name": post_name,
@@ -1222,6 +1265,16 @@ async def startup_event():
     global _push_client
     _push_client = httpx.AsyncClient(base_url="https://push-service-placeholder.com")
     await seed_admin()
+    await db.jobs.create_index("job_id", unique=True)
+    await db.jobs.create_index("source_url", unique=True)
+    await db.jobs.create_index("content_hash", unique=True)
+
+    await db.jobs.create_index("post_type")
+    await db.jobs.create_index("last_date")
+    await db.jobs.create_index("organization")
+    await db.jobs.create_index("created_at")
+    await db.jobs.create_index("qualifications")
+    await db.jobs.create_index("branches")
     # 🚀 Yahan purane naam ko naye background engine se replace kar diya gaya hai
     scheduler.add_job(refresh_jobs_task, 'interval', hours=12)
     scheduler.start()
