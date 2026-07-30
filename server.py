@@ -1032,24 +1032,16 @@ async def register_push(body: RegisterPushBody, user: dict = Depends(get_current
 # Yeh aapki backend API file hogi (e.g., main.py ya admin.py)
 
 @api.post("/admin/jobs")
-async def create_admin_job(data: dict): # Ya jo bhi aapka Pydantic schema ho
-    
-    # 🚀 STEP 1: Frontend se aa raha post_type get karein (Agar na aaye toh 'Job' default set kardein)
-    post_type = data.get("post_type", "Job")
-    ai_details = await extract_job_details_with_ai(job_url)
+async def create_admin_job(data: dict):
 
     job_id = f"job_{uuid.uuid4().hex[:12]}"
 
-    # Database Entry
     new_post = {
         "job_id": job_id,
         "organization": data.get("organization"),
         "post_name": data.get("post_name"),
         "post_type": data.get("post_type", "Job"),
         "category": data.get("category", "Government"),
-        
-        # 🚀 STEP 2: YAHAN POST TYPE KO DATABASE MEIN SAVE KARAYEIN 
-        
         "branches": data.get("branches", []),
         "qualifications": data.get("qualifications", []),
         "vacancies": data.get("vacancies", "NA"),
@@ -1063,7 +1055,7 @@ async def create_admin_job(data: dict): # Ya jo bhi aapka Pydantic schema ho
         "max_age": data.get("max_age"),
         "description": data.get("description"),
         "is_active": True,
-        "is_trending": False # Default
+        "is_trending": False
     }
 
     await db.jobs.insert_one(new_post)
