@@ -58,7 +58,7 @@ _push_client = None
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama-3.3-70b-versatile" 
+GROQ_MODEL = "llama3.1-8b-instant" 
 
 ALLOWED_POST_TYPES = {
     "Job", "Admit Card", "Result", "Scholarship", "Apprenticeship",
@@ -128,7 +128,7 @@ def fallback_qualifications(title: str, summary: str, qualifications: list) -> l
         return qualifications
     text = f"{title} {summary}".lower()
     found = []
-    for phrase, label in (("12th", "12th"), ("intermediate", "12th"), ("iti", "ITI"), ("10th", "10th"), ("diploma", "Diploma"), ("graduate", "Graduate"), ("b.tech", "B.Tech"), ("btech", "B.Tech")):
+    for phrase, label in (("12th", "12th"), ("intermediate", "12th"), ("iti", "ITI"), ("10th", "10th"), ("diploma", "Diploma"), ("graduate", "Graduate"), ("b.tech", "B.Tech"), ("btech", "B.Tech"), ("be", "B.Tech"), ("b.sc", "B.Sc"), ("bsc", "B.Sc")):
         if phrase in text and label not in found: found.append(label)
     return found or ["Not Specified"]
 
@@ -185,8 +185,16 @@ async def extract_job_details_with_ai(url: str) -> dict:
             soup = BeautifulSoup(response.text, 'html.parser')
             
             if not page_text:
+                # 🚀 BIG FIX HERE: HTML Tables ko pipe (|) formate mein convert kar rahe hain
+                # Taaki AI SAIL Rourkela jaise table (Trade | ITI | Diploma) ko samajh sake
+                for table in soup.find_all("table"):
+                    for tr in table.find_all("tr"):
+                        for td in tr.find_all(["td", "th"]):
+                            td.append(" | ")
+                        tr.append("\n")
+                
                 for tag in soup(["script", "style", "nav", "footer"]): tag.decompose()
-                page_text = soup.get_text(separator=' | ', strip=True)[:15000]
+                page_text = soup.get_text(separator=' ', strip=True)[:15000]
 
             important_links = []
             for a in soup.find_all('a', href=True):
@@ -232,6 +240,7 @@ async def extract_job_details_with_ai(url: str) -> dict:
       "total_post": "Number only (e.g., 6557)",
       "category_vacancies": [ {{ "post_name": "Specific Post Name OR Trade", "General": "NA", "OBC": "NA", "EWS": "NA", "SC": "NA", "ST": "NA" }} ],
       "state_wise_vacancies": [ {{ "state_name": "State", "vacancies": "Number" }} ],
+      "trade_wise_vacancies": [ {{ "trade_name": "Trade (e.g., Fitter, COPA)", "ITI": "Number or NA", "Diploma": "Number or NA", "Degree": "Number or NA" }} ],
       "salary_wise_post_name":[ {{ "post_name": "Specific Post Name OR Trade", "salary": "Salary or Pay scale or Stipend" }} ],
       "multiple_posts": [
          {{ "post_name": "Specific Post Name OR Trade", "vacancies": "Number", "eligibility": "Qualification for this specific post" }}
@@ -265,9 +274,9 @@ async def extract_job_details_with_ai(url: str) -> dict:
                 {"role": "user", "content": prompt}
             ],
             "response_format": {"type": "json_object"},
-            "temperature": 0.1 
+            "temperature": 0.0 
         }
-        async with httpx.AsyncClient(timeout=30.0) as ai_client:
+        async with httpx.AsyncClient(timeout=45.0) as ai_client:
             resp = await ai_client.post(GROQ_URL, headers=headers, json=payload)
             resp.raise_for_status()
             return first_json_object(resp.json()['choices'][0]['message']['content'])
@@ -361,6 +370,7 @@ async def refresh_jobs_task() -> None:
                     
                     "category_vacancies": details.get("category_vacancies", []),
                     "multiple_posts": details.get("multiple_posts", []),
+                    "trade_wise_vacancies": details.get("trade_wise_vacancies", []), # For SAIL Rourkela style UI
                     "salary_wise_post_name": details.get("salary_wise_post_name", []),
                     "state_wise_vacancies": details.get("state_wise_vacancies", []),
                     "mode_of_selection": details.get("mode_of_selection", []),
@@ -373,6 +383,7 @@ async def refresh_jobs_task() -> None:
                     "apply_link": action_link,
                     "min_age": as_int_or_none(details.get("min_age")),
                     "max_age": as_int_or_none(details.get("max_age")),
+                    "detailed_age_info": details.get("detailed_age_info", "NA"), # For RRB / ISRO style complex age info
                     "description": summary,
                     "is_active": True,
                     "source": f"scraper:{src['name']}",
