@@ -9,7 +9,7 @@ import json
 import httpx
 import hashlib
 import pandas as pd
-from collection import defaultdict
+from collections import defaultdict
 from bs4 import BeautifulSoup
 from pathlib import Path
 from datetime import datetime, timedelta, timezone, date
