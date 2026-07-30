@@ -59,7 +59,7 @@ db = client[DB_NAME]
 _push_client = None
 
 
-GROQ_API_KEY = os.environ.get("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", "")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "llama-3.3-70b-versatile" 
 
