@@ -1845,15 +1845,6 @@ async def on_shutdown():
     
     client.close()
 
-@app.on_event("shutdown")
-async def on_shutdown():
-    try:
-        scheduler.shutdown(wait=False)
-    except Exception:
-        pass
-    
-    client.close()
-
 
 app.include_router(api)
 app.add_middleware(
