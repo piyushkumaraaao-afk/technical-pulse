@@ -59,7 +59,7 @@ db = client[DB_NAME]
 _push_client = None
 
 
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+GROQ_API_KEY = os.environ.get("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", "")
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "llama-3.3-70b-versatile" 
 
@@ -1835,6 +1835,15 @@ async def ensure_indexes():
     await db.push_devices.create_index([("user_id", 1), ("device_token", 1)], unique=True)
 
 
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    try:
+        scheduler.shutdown(wait=False)
+    except Exception:
+        pass
+    
+    client.close()
 
 @app.on_event("shutdown")
 async def on_shutdown():
