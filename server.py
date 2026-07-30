@@ -1835,19 +1835,6 @@ async def ensure_indexes():
     await db.push_devices.create_index([("user_id", 1), ("device_token", 1)], unique=True)
 
 
-@app.on_event("startup")
-async def startup_event():
-    global _push_client
-    _push_client = httpx.AsyncClient(base_url="https://push-service-placeholder.com")
-    await seed_admin()
-    
-    # Check karein ki scheduler pehle se to nahi chal raha
-    if not scheduler.running:
-        scheduler.add_job(refresh_jobs_task, 'interval', hours=12)
-        scheduler.start()
-        
-    logger.info("CareerPulse Background Services Started Successfully")
-
 
 @app.on_event("shutdown")
 async def on_shutdown():
