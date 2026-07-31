@@ -67,7 +67,7 @@ GROQ_MODEL = "llama-3.1-8b-instant"
 
 ALLOWED_POST_TYPES = {
     "Job", "Admit Card", "Result", "Scholarship", "Apprenticeship",
-    "Internship", "Upcoming Exam", "IGNORE"
+    "Internship", "Upcoming Exam", "Answer Key", "IGNORE"
 }
 
 # =======================
@@ -290,7 +290,10 @@ async def extract_job_details_with_ai(url: str) -> dict:
       "location": "City or State",
       "last_date": "YYYY-MM-DD",
       "check_official_notice": "Exact Notification URL from LINKS.",
-      "apply_online_link": "Exact Apply URL from LINKS."
+      "apply_online_link": "Exact Apply URL from LINKS.",
+      "admit_card_link": "Exact Admit Card URL",
+      "answer_key_link": "Exact Answer Key URL",
+      "result_link": "Exact Result URL"
     }}
     
     --- DATA TO ANALYZE ---
@@ -333,7 +336,7 @@ async def refresh_jobs_task() -> None:
 
     result = await db.jobs.update_many(
         {"is_active": True, "last_date": {"$type": "string", "$lt": today_str}},
-        {"$set": {"is_active": False}},
+        {"$set": {"is_active": False, "archive": True}},
     )
     removed = result.modified_count
     sources = await db.rss_sources.find({}, {"_id": 0}).to_list(50)
@@ -373,6 +376,17 @@ async def refresh_jobs_task() -> None:
 
                 print(f"Deep scraping [{title_type}]: {title}")
                 details = await extract_job_details_with_ai(job_link)
+
+                parent_job_id = None
+
+                if post_type in ["Admit Card", "Result", "Answer Key"]:
+                    original_job = await db.jobs.find_one({
+                        "post_name": {"$regex": post_name[:20], "$options": "i"},
+                        "post_type": "Job"
+                    })
+
+                    if original_job:
+                        parent_job_id = original_job["job_id"]
                 
                 # 🚀 PYTHON FAILSAFE: Agar AI bewakoofi karke Result/Admit Card ko IGNORE kar de,
                 # Toh hum AI ki baat nahi manenge, aur apna 'title_type' use karke usko add kar lenge!
@@ -398,8 +412,18 @@ async def refresh_jobs_task() -> None:
                 exact_date = valid_iso_date(details.get("last_date"))
                 final_last_date = exact_date if exact_date else (date.today() + timedelta(days=30)).isoformat()
 
+                similar = await db.jobs.find_one({
+                    "organization": details.get("organization"),
+                    "post_name": post_name,
+                    "last_date": final_last_date
+                })
+
+                if similar:
+                    continue
+
                 await db.jobs.insert_one({
                     "job_id": f"job_{uuid.uuid4().hex[:12]}",
+                    "parent_job_id": parent_job_id,
                     "content_hash": content_hash,
                     "source_url": job_link,
                     "organization": details.get("organization", "NA") if details.get("organization", "NA") != "NA" else src["name"],
@@ -422,6 +446,7 @@ async def refresh_jobs_task() -> None:
                     "location": details.get("location", "NA"),
                     
                     "last_date": final_last_date,
+                    "expires_at": final_last_date,
                     "is_exact_date": bool(exact_date), 
                     
                     "notification_pdf": details.get("check_official_notice") if details.get("check_official_notice") != "NA" else None,
@@ -433,7 +458,44 @@ async def refresh_jobs_task() -> None:
                     "is_active": True,
                     "source": f"scraper:{src['name']}",
                     "created_at": datetime.now(timezone.utc).isoformat(),
+                    "admit_card_link": details.get("admit_card_link"),
+                    "answer_key_link": details.get("answer_key_link"),
+                    "result_link": details.get("result_link"),
+                    "views": 0,
+                    "saves": 0,
+                    "applications": 0,
+                    "trending_score": 0,
+                    "search_count": 0,
+                    
                 })
+                if parent_job_id:
+
+                    if post_type == "Admit Card":
+                        await db.applications.update_many(
+                            {"job_id": parent_job_id},
+                            {"$set": {"status": "admit_card"}}
+                        )
+
+                    elif post_type == "Result":
+                        await db.applications.update_many(
+                            {"job_id": parent_job_id},
+                            {"$set": {"status": "result"}}
+                        )
+
+                    saved_users = await db.applications.find(
+                        {"job_id": parent_job_id},
+                        {"_id": 0, "user_id": 1}
+                    ).to_list(1000)
+
+                    recipients = [x["user_id"] for x in saved_users]
+
+                    await send_push(
+                        recipients,
+                        {
+                            "title": f"{post_type} Released",
+                            "message": post_name
+                        }
+                    )
                 added += 1
 
     print(f"✅ Scraping cycle finished! +{added} added, {removed} expired")
@@ -617,6 +679,21 @@ async def send_push(recipients: List[str], data: dict, idempotency_key: Optional
                 logger.warning(f"push trigger failed {resp.status_code}: {resp.text[:200]}")
         except Exception as e:
             logger.warning(f"push trigger error: {e}")
+async def notify_saved_users(parent_job_id, post_type, post_name):
+
+    users = await db.applications.find(
+        {"job_id": parent_job_id},
+        {"_id": 0, "user_id": 1}
+    ).to_list(1000)
+
+    if users:
+        await send_push(
+            [u["user_id"] for u in users],
+            {
+                "title": f"{post_type} Released",
+                "message": post_name
+            }
+        )
 
 
 # =======================
@@ -760,6 +837,7 @@ async def list_jobs(
     search: Optional[str] = None,
     post_type: Optional[str] = None, # 🚀 Naya parameter add kiya
     limit: int = 50,
+    page: int = 1,
 ):
     q: dict = {"is_active": True}
     
@@ -788,6 +866,11 @@ async def list_jobs(
             {"$or": [{"max_age": None}, {"max_age": {"$gte": age}}]},
         ]
     if search:
+        await db.search_logs.insert_one({
+            "query": search,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        })    
+    if search:
         q["$or"] = [
             {"post_name": {"$regex": search, "$options": "i"}},
             {"post_type": {"$regex": search, "$options": "i"}},
@@ -795,29 +878,148 @@ async def list_jobs(
             {"location": {"$regex": search, "$options": "i"}},
         ]
         
-    cursor = db.jobs.find(q, {"_id": 0}).sort("last_date", 1).limit(limit)
+    skip = max(0, (page - 1) * limit)
+
+    cursor = (
+        db.jobs.find(q, {"_id": 0})
+        .sort("last_date", 1)
+        .skip(skip)
+        .limit(limit)
+    )
     jobs = await cursor.to_list(length=limit)
-    return {"jobs": jobs, "count": len(jobs)}
+    total = await db.jobs.count_documents(q)
+    return {
+    "jobs": jobs,
+    "count": len(jobs),
+    "total": total,
+    "page": page,
+    "limit": limit
+}
 
 
 @api.get("/jobs/recommended")
 async def recommended_jobs(user: dict = Depends(get_current_user)):
-    q: dict = {"is_active": True, "post_type": "Job"}
-    if user.get("branch"):
-        q["branches"] = user["branch"]
-    if user.get("qualification"):
-        q["qualifications"] = user["qualification"]
-    cursor = db.jobs.find(q, {"_id": 0}).sort("last_date", 1).limit(10)
-    jobs = await cursor.to_list(length=10)
+
+    jobs = await db.jobs.find({
+        "is_active": True,
+        "post_type": "Job",
+        "$or": [
+            {"branches": {"$in": [user.get("branch", "")]}},
+            {"qualifications": {"$in": [user.get("qualification", "")]}}
+        ]
+    }, {"_id": 0}).sort("views", -1).limit(10).to_list(10)
+
     return {"jobs": jobs}
 
 
 @api.get("/jobs/{job_id}")
-async def get_job(job_id: str):
-    job = await db.jobs.find_one({"job_id": job_id}, {"_id": 0})
+async def get_job(
+    job_id: str, 
+    user: dict = Depends(get_current_user)
+):
+
+    await db.jobs.update_one(
+        {"job_id": job_id},
+        {
+            "$inc": {
+                "views": 1,
+                "trending_score": 1
+            }
+        }
+    )
+    
+    job = await db.jobs.find_one(
+        {"job_id": job_id},
+        {"_id": 0}
+    )
+    if user:
+        await db.recent_jobs.update_one(
+            {
+                "user_id": user["user_id"],
+                "job_id": job_id
+            },
+            {
+                "$set": {
+                    "viewed_at": datetime.now(timezone.utc)
+                }
+            },
+            upsert=True
+        )
     if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Job not found"
+        )
+
     return {"job": job}
+
+@api.get("/jobs/{job_id}/related")
+async def related_jobs(job_id: str):
+
+    job = await db.jobs.find_one(
+        {"job_id": job_id},
+        {"_id": 0}
+    )
+
+    if not job:
+        raise HTTPException(404, "Job not found")
+
+    related = await db.jobs.find({
+        "job_id": {"$ne": job_id},
+        "is_active": True,
+        "$or": [
+            {"category": job.get("category")},
+            {"branches": {"$in": job.get("branches", [])}},
+            {"qualifications": {"$in": job.get("qualifications", [])}}
+        ]
+    },
+    {"_id": 0}
+    ).limit(10).to_list(10)
+
+    return {"jobs": related}
+
+@api.get("/jobs/recent")
+async def recent_jobs(
+    user: dict = Depends(get_current_user)
+):
+
+    jobs = await db.recent_jobs.aggregate([
+        {"$match": {"user_id": user["user_id"]}},
+        {"$sort": {"viewed_at": -1}},
+        {"$limit": 20},
+        {"$lookup": {
+            "from": "jobs",
+            "localField": "job_id",
+            "foreignField": "job_id",
+            "as": "job"
+        }},
+        {"$unwind": "$job"},
+        {"$replaceRoot": {"newRoot": "$job"}}
+    ]).to_list(20)
+
+    return {"jobs": jobs}
+
+@api.get("/jobs/expiring")
+async def expiring():
+    return {
+        "jobs": await db.jobs.find(
+            {"is_active":True},
+            {"_id":0}
+        ).sort("last_date",1).limit(20).to_list(20)
+    }
+
+@api.get("/jobs/for-you")
+async def for_you(user: dict = Depends(get_current_user)):
+
+    jobs = await db.jobs.find({
+        "is_active": True,
+        "$or": [
+            {"branches": {"$in": [user.get("branch","")]}},
+            {"qualifications": {"$in": [user.get("qualification","")]}}
+        ]
+    }, {"_id": 0}).sort("trending_score",-1).limit(20).to_list(20)
+
+    return {"jobs": jobs}                
 
 
 @api.post("/jobs/check-eligibility")
@@ -859,45 +1061,182 @@ async def check_eligibility(body: EligibilityCheckBody, user: dict = Depends(get
 
 # ---- Application Tracker ----
 @api.post("/applications/save")
-async def save_job(body: SaveJobBody, user: dict = Depends(get_current_user)):
-    job = await db.jobs.find_one({"job_id": body.job_id}, {"_id": 0})
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    await db.applications.update_one(
-        {"user_id": user["user_id"], "job_id": body.job_id},
-        {"$set": {
-            "user_id": user["user_id"],
-            "job_id": body.job_id,
-            "status": "saved",
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }},
-        upsert=True,
+async def save_job(
+    body: SaveJobBody,
+    user: dict = Depends(get_current_user)
+):
+
+    job = await db.jobs.find_one(
+        {"job_id": body.job_id},
+        {"_id": 0}
     )
+
+    if not job:
+        raise HTTPException(
+            status_code=404,
+            detail="Job not found"
+        )
+
+    result = await db.applications.update_one(
+        {
+            "user_id": user["user_id"],
+            "job_id": body.job_id
+        },
+        {
+            "$setOnInsert": {
+                "user_id": user["user_id"],
+                "job_id": body.job_id,
+                "status": "saved",
+                "post_name": job.get("post_name"),
+                "organization": job.get("organization"),
+                "post_type": job.get("post_type"),
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat()
+            }
+        },
+        upsert=True
+    )
+
+    if result.upserted_id:
+        await db.jobs.update_one(
+            {"job_id": body.job_id},
+            {
+                "$inc": {
+                    "saves": 1,
+                    "trending_score": 3
+                }
+            }
+        )
+
+    await send_push(
+        [user["user_id"]],
+        {
+            "title": "Job Saved",
+            "message": job["post_name"]
+        }
+    )
+
     return {"ok": True}
 
 
 @api.post("/applications/apply")
-async def apply_job(body: ApplyJobBody, user: dict = Depends(get_current_user)):
-    job = await db.jobs.find_one({"job_id": body.job_id}, {"_id": 0})
+async def apply_job(
+    body: ApplyJobBody,
+    user: dict = Depends(get_current_user)
+):
+
+    job = await db.jobs.find_one(
+        {"job_id": body.job_id},
+        {"_id": 0}
+    )
+
     if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    await db.applications.update_one(
-        {"user_id": user["user_id"], "job_id": body.job_id},
-        {"$set": {
+        raise HTTPException(
+            status_code=404,
+            detail="Job not found"
+        )
+
+    existing = await db.applications.find_one(
+        {
             "user_id": user["user_id"],
             "job_id": body.job_id,
-            "status": "applied",
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }},
-        upsert=True,
+            "status": "applied"
+        }
     )
+
+    if not existing:
+        await db.jobs.update_one(
+            {"job_id": body.job_id},
+            {
+                "$inc": {
+                    "applications": 1,
+                    "trending_score": 5
+                }
+            }
+        )
+
+    await db.applications.update_one(
+        {
+            "user_id": user["user_id"],
+            "job_id": body.job_id
+        },
+        {
+            "$set": {
+                "user_id": user["user_id"],
+                "job_id": body.job_id,
+                "status": "applied",
+                "post_name": job.get("post_name"),
+                "organization": job.get("organization"),
+                "post_type": job.get("post_type"),
+                "applied_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat()
+            }
+        },
+        upsert=True
+    )
+
+    await send_push(
+        [user["user_id"]],
+        {
+            "title": "Application Submitted",
+            "message": job["post_name"]
+        }
+    )
+
     return {"ok": True}
+
+@api.get("/applications/my")
+async def my_applications(user: dict = Depends(get_current_user)):
+
+    items = await db.applications.aggregate([
+        {"$match": {"user_id": user["user_id"]}},
+        {
+            "$lookup": {
+                "from": "jobs",
+                "localField": "job_id",
+                "foreignField": "job_id",
+                "as": "job"
+            }
+        },
+        {
+            "$unwind": {
+                "path": "$job",
+                "preserveNullAndEmptyArrays": True
+            }
+        },
+        {"$sort": {"updated_at": -1}},
+        {"$project": {
+            "_id": 0,
+            "job.post_name": 1,
+            "job.organization": 1,
+            "job.admit_card_link": 1,
+            "job.answer_key_link": 1,
+            "job.result_link": 1,
+            "status": 1,
+            "updated_at": 1
+        }}
+    ]).to_list(500)
+
+    return {"items": items}    
 
 
 @api.get("/applications")
 async def get_applications(user: dict = Depends(get_current_user)):
     apps = await db.applications.find({"user_id": user["user_id"]}, {"_id": 0}).to_list(500)
     job_ids = [a["job_id"] for a in apps]
+    related_updates = await db.jobs.find({
+        "parent_job_id": {"$in": job_ids}
+    }, {"_id": 0}).to_list(500)
+
+    updates_map = {}
+
+    for item in related_updates:
+        pid = item["parent_job_id"]
+
+        if pid not in updates_map:
+            updates_map[pid] = []
+
+        updates_map[pid].append(item)
     jobs_list = await db.jobs.find({"job_id": {"$in": job_ids}}, {"_id": 0}).to_list(500)
     jobs_map = {j["job_id"]: j for j in jobs_list}
     saved = []
@@ -909,7 +1248,16 @@ async def get_applications(user: dict = Depends(get_current_user)):
         job = jobs_map.get(a["job_id"])
         if not job:
             continue
-        item = {**a, "job": job}
+        item = {
+            **a,
+            "job": job,
+            "updates": updates_map.get(job["job_id"], []),
+            "post_name": job.get("post_name"),
+            "organization": job.get("organization"),
+            "admit_card_link": job.get("admit_card_link"),
+            "answer_key_link": job.get("answer_key_link"),
+            "result_link": job.get("result_link")
+        }
         if a["status"] == "applied":
             applied.append(item)
         else:
@@ -922,8 +1270,33 @@ async def get_applications(user: dict = Depends(get_current_user)):
 
 @api.delete("/applications/{job_id}")
 async def remove_application(job_id: str, user: dict = Depends(get_current_user)):
-    await db.applications.delete_one({"user_id": user["user_id"], "job_id": job_id})
+    app = await db.applications.find_one(
+        {"user_id": user["user_id"], "job_id": job_id}
+    )
+
+    if app:
+        field = "applications" if app["status"] == "applied" else "saves"
+
+        await db.jobs.update_one(
+            {"job_id": job_id},
+            {"$inc": {field: -1}}
+        )
+
+        await db.applications.delete_one(
+            {"user_id": user["user_id"], "job_id": job_id}
+        )
+
     return {"ok": True}
+
+@api.get("/applications/tracker")
+async def tracker(user: dict = Depends(get_current_user)):
+
+    apps = await db.applications.find(
+        {"user_id": user["user_id"]},
+        {"_id": 0}
+    ).to_list(500)
+
+    return {"applications": apps}    
 
 
 # ---- Resume ----
@@ -1214,6 +1587,14 @@ async def admin_refresh_jobs(background_tasks: BackgroundTasks, admin: dict = De
     # Frontend par '+0 added' aayega, lekin backend parde ke piche saari jobs aaram se save kar dega.
     return {"added": 0, "removed": 0}
 
+@api.get("/admin/analytics")
+async def analytics():
+    return {
+        "top_views": await db.jobs.find({},{"_id":0}).sort("views",-1).limit(5).to_list(5),
+        "top_saves": await db.jobs.find({},{"_id":0}).sort("saves",-1).limit(5).to_list(5),
+        "top_applied": await db.jobs.find({},{"_id":0}).sort("applications",-1).limit(5).to_list(5),
+    }    
+
 # =======================
 # Feedback & User Management 
 # =======================
@@ -1237,6 +1618,66 @@ async def submit_feedback(body: FeedbackBody, user: dict = Depends(get_current_u
 async def get_admin_feedback(admin: dict = Depends(require_admin)):
     feedbacks = await db.feedback.find({}, {"_id": 0}).sort("created_at", -1).to_list(100)
     return {"feedbacks": feedbacks}
+
+@api.get("/admin/top-viewed")
+async def top_viewed():
+    jobs = await db.jobs.find(
+        {}, {"_id": 0, "post_name": 1, "organization": 1, "views": 1}
+    ).sort("views", -1).limit(10).to_list(10)
+
+    return {"jobs": jobs}
+
+@api.get("/admin/top-saved")
+async def top_saved():
+    jobs = await db.jobs.find(
+        {}, {"_id": 0, "post_name": 1, "organization": 1, "saves": 1}
+    ).sort("saves", -1).limit(10).to_list(10)
+
+    return {"jobs": jobs}
+
+@api.get("/admin/top-applied")
+async def top_applied():
+    jobs = await db.jobs.find(
+        {}, {"_id": 0, "post_name": 1, "organization": 1, "applications": 1}
+    ).sort("applications", -1).limit(10).to_list(10)
+
+    return {"jobs": jobs}
+
+@api.get("/admin/top-searches")
+async def top_searches():
+    data = await db.search_logs.aggregate([
+        {"$group":{"_id":"$query","count":{"$sum":1}}},
+        {"$sort":{"count":-1}},
+        {"$limit":20}
+    ]).to_list(20)
+
+    return {"searches": data}    
+
+@api.get("/users/me/stats")
+async def my_stats(user: dict = Depends(get_current_user)):
+
+    saved = await db.applications.count_documents({
+        "user_id": user["user_id"],
+        "status": "saved"
+    })
+
+    applied = await db.applications.count_documents({
+        "user_id": user["user_id"],
+        "status": "applied"
+    })
+
+    return {
+        "saved_jobs": saved,
+        "applied_jobs": applied
+    }
+
+@api.get("/stats")
+async def stats():
+    return {
+        "jobs": await db.jobs.count_documents({"is_active":True}),
+        "users": await db.users.count_documents({}),
+        "applications": await db.applications.count_documents({"status":"applied"})
+    }                    
 
 
 # =======================
@@ -1283,6 +1724,38 @@ async def startup_event():
     await db.jobs.create_index("created_at")
     await db.jobs.create_index("qualifications")
     await db.jobs.create_index("branches")
+    await db.jobs.create_index("parent_job_id")
+    await db.jobs.create_index("views")
+    await db.jobs.create_index("saves")
+    await db.jobs.create_index("applications")
+    await db.jobs.create_index("trending_score")
+    await db.jobs.create_index("category")
+    await db.jobs.create_index([
+        ("organization", 1),
+        ("post_name", 1),
+        ("last_date", 1)
+    ])
+    await db.jobs.create_index(
+        [("is_active", 1), ("last_date", 1)]
+    )
+    await db.applications.create_index("user_id")
+    await db.applications.create_index("saved_at")
+    await db.applications.create_index("applied_at")
+    await db.applications.create_index(
+        [("user_id", 1), ("job_id", 1)],
+        unique=True
+    )
+    await db.recent_jobs.create_index(
+        [("user_id", 1), ("job_id", 1)],
+        unique=True
+    )
+    await db.push_devices.create_index("user_id")
+    await db.push_devices.create_index("device_token", unique=True)
+    await db.jobs.create_index([
+        ("post_name", "text"),
+        ("organization", "text"),
+        ("description", "text")
+    ])
     # 🚀 Yahan purane naam ko naye background engine se replace kar diya gaya hai
     scheduler.add_job(refresh_jobs_task, 'interval', hours=12)
     scheduler.start()
@@ -1296,6 +1769,84 @@ async def shutdown_event():
     scheduler.shutdown()
 
 app.include_router(api)
+
+@api.get("/jobs/trending")
+async def trending_jobs():
+
+    jobs = await db.jobs.find(
+        {"is_active": True},
+        {"_id": 0}
+    ).sort("trending_score", -1).limit(20).to_list(20)
+
+    return {"jobs": jobs}
+
+@api.get("/jobs/popular")
+async def popular_jobs():
+    jobs = await db.jobs.find(
+        {"is_active": True},
+        {"_id": 0}
+    ).sort(
+        [("applications", -1), ("saves", -1)]
+    ).limit(20).to_list(20)
+
+    return {"jobs": jobs}
+
+@api.get("/jobs/latest")
+async def latest_jobs():
+    jobs = await db.jobs.find(
+        {"is_active": True},
+        {"_id": 0}
+    ).sort("created_at", -1).limit(20).to_list(20)
+
+    return {"jobs": jobs}
+
+@api.get("/jobs/count")
+async def jobs_count():
+    return {
+        "active": await db.jobs.count_documents({"is_active":True}),
+        "total": await db.jobs.count_documents({})
+    }
+
+@api.get("/jobs/deadline")
+async def deadline_jobs():
+    jobs = await db.jobs.find(
+        {"is_active":True},
+        {"_id":0}
+    ).sort("last_date",1).limit(10).to_list(10)
+
+    return {"jobs": jobs}
+
+@api.get("/jobs/closing-soon")
+async def closing_soon():
+    return {
+        "jobs": await db.jobs.find(
+            {"is_active":True},
+            {"_id":0}
+        ).sort("last_date",1).limit(20).to_list(20)
+    }            
+
+@api.get("/home")
+async def home():
+
+    return {
+        "trending": await db.jobs.find(
+            {"is_active": True},
+            {"_id": 0}
+        ).sort("trending_score",-1).limit(10).to_list(10),
+
+        "latest": await db.jobs.find(
+            {"is_active": True},
+            {"_id": 0}
+        ).sort("created_at",-1).limit(10).to_list(10),
+
+        "popular": await db.jobs.find(
+            {"is_active": True},
+            {"_id": 0}
+        ).sort([
+            ("applications",-1),
+            ("saves",-1)
+        ]).limit(10).to_list(10)
+    }            
 
 
 SAMPLE_JOBS = [
