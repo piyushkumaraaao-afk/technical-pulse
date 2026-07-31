@@ -1037,24 +1037,20 @@ async def register_push(body: RegisterPushBody, user: dict = Depends(get_current
 async def create_admin_job(data: dict):
     job_id = f"job_{uuid.uuid4().hex[:12]}"
 
-    # 1. Data ka hash banane ke liye fields extract karein
+    # Har post_type aur post_name ka ekdum unique code banega
     hash_data = {
-        "organization": data.get("organization"),
-        "post_name": data.get("post_name"),
-        "post_type": data.get("post_type", "Job"),  # <-- Naya add kiya
-        "category": data.get("category", "Government"), # <-- Naya add kiya
-        "location": data.get("location"),
-        "apply_link": data.get("apply_link")
+        "organization": data.get("organization", ""),
+        "post_name": data.get("post_name", ""),
+        "post_type": data.get("post_type", "Job"),
+        "category": data.get("category", "Government")
     }
     
-    # 2. Hash generate karein
     hash_string = json.dumps(hash_data, sort_keys=True).encode('utf-8')
     content_hash = hashlib.sha256(hash_string).hexdigest()
 
-    # 3. Naya post object banayein (Yahan content_hash hona BAHUT zaruri hai)
     new_post = {
         "job_id": job_id,
-        "content_hash": content_hash,  # <--- YE LINE MISSING HOGI AAPKE CODE MEIN
+        "content_hash": content_hash,  # <- Ab ye perfectly database me jayega
         "organization": data.get("organization"),
         "post_name": data.get("post_name"),
         "post_type": data.get("post_type", "Job"),
