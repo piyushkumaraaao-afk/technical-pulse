@@ -15,6 +15,7 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone, date
 from typing import List, Optional, Literal, Any
 from fastapi.security import HTTPBearer
+from fastapi import HTTPException
 from fastapi import Query
 from io import BytesIO
 import random
@@ -1036,21 +1037,22 @@ async def register_push(body: RegisterPushBody, user: dict = Depends(get_current
 async def create_admin_job(data: dict):
     job_id = f"job_{uuid.uuid4().hex[:12]}"
 
-    # 1. Create a dictionary of the core data to hash (ignoring dynamic things like job_id)
+    # 1. Data ka hash banane ke liye fields extract karein
     hash_data = {
         "organization": data.get("organization"),
         "post_name": data.get("post_name"),
-        "location": data.get("location", "India"),
+        "location": data.get("location"), # null handle ho jayega automatically
         "apply_link": data.get("apply_link")
     }
     
-    # 2. Generate a stable content_hash using SHA-256
+    # 2. Hash generate karein
     hash_string = json.dumps(hash_data, sort_keys=True).encode('utf-8')
     content_hash = hashlib.sha256(hash_string).hexdigest()
 
+    # 3. Naya post object banayein (Yahan content_hash hona BAHUT zaruri hai)
     new_post = {
         "job_id": job_id,
-        "content_hash": content_hash,  # <-- ADDED THIS
+        "content_hash": content_hash,  # <--- YE LINE MISSING HOGI AAPKE CODE MEIN
         "organization": data.get("organization"),
         "post_name": data.get("post_name"),
         "post_type": data.get("post_type", "Job"),
@@ -1071,12 +1073,10 @@ async def create_admin_job(data: dict):
         "is_trending": False
     }
 
-    # 3. Handle the DuplicateKeyError gracefully
     try:
         await db.jobs.insert_one(new_post)
         return {"message": "Post created successfully"}
     except DuplicateKeyError:
-        # If a post with the exact same details (content_hash) exists, return a 400 error
         raise HTTPException(status_code=400, detail="This job post already exists in the database.")
 
 
