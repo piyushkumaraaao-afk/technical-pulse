@@ -899,16 +899,21 @@ async def list_jobs(
 
 @api.get("/jobs/recommended")
 async def recommended_jobs(user: dict = Depends(get_current_user)):
-
-    jobs = await db.jobs.find({
+    q = {
         "is_active": True,
         "post_type": "Job",
         "$or": [
-            {"branches": {"$in": [user.get("branch", "")]}},
-            {"qualifications": {"$in": [user.get("qualification", "")]}}
+            {"branches": user.get("branch")},
+            {"qualifications": user.get("qualification")},
+            {"location": user.get("state")}
         ]
-    }, {"_id": 0}).sort("views", -1).limit(10).to_list(10)
-
+    }
+    jobs = await db.jobs.find(
+        q,
+        {"_id":0}
+    ).sort(
+        [("trending_score",-1),("views",-1)]
+    ).limit(20).to_list(20)
     return {"jobs": jobs}
 
 
@@ -1715,7 +1720,7 @@ async def startup_event():
     _push_client = httpx.AsyncClient(base_url="https://push-service-placeholder.com")
     await seed_admin()
     await db.jobs.create_index("job_id", unique=True)
-    await db.jobs.create_index("source_url", unique=True)
+    await db.jobs.create_index("source_url", unique=True, sparse=True)
     await db.jobs.create_index("content_hash", unique=True)
 
     await db.jobs.create_index("post_type")
