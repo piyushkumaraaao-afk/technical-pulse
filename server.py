@@ -1041,7 +1041,9 @@ async def create_admin_job(data: dict):
     hash_data = {
         "organization": data.get("organization"),
         "post_name": data.get("post_name"),
-        "location": data.get("location"), # null handle ho jayega automatically
+        "post_type": data.get("post_type", "Job"),  # <-- Naya add kiya
+        "category": data.get("category", "Government"), # <-- Naya add kiya
+        "location": data.get("location"),
         "apply_link": data.get("apply_link")
     }
     
