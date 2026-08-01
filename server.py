@@ -541,45 +541,6 @@ class LoginBody(BaseModel):
     email: EmailStr
     password: str
 
-from google.oauth2 import id_token
-from google.auth.transport import requests
-
-class GoogleTokenBody(BaseModel):
-    id_token: str
-
-@api.post("/auth/google")
-async def google_login(body: GoogleTokenBody):
-
-    google_user = id_token.verify_oauth2_token(
-        body.id_token,
-        requests.Request(),
-        GOOGLE_CLIENT_ID
-    )
-
-    email = google_user["email"].lower()
-    name = google_user.get("name", "")
-
-    user = await db.users.find_one({"email": email})
-
-    if not user:
-        user_id = f"user_{uuid.uuid4().hex[:12]}"
-
-        await db.users.insert_one({
-            "user_id": user_id,
-            "email": email,
-            "name": name,
-            "auth_provider": "google",
-            "is_admin": False
-        })
-
-        user = await db.users.find_one({"email": email})
-
-    token = create_jwt(user["user_id"])
-
-    return {
-        "access_token": token,
-        "user": user
-    }
 
 class ProfileUpdateBody(BaseModel):
     name: Optional[str] = None
@@ -836,6 +797,47 @@ async def login(body: LoginBody):
     token = create_jwt(user["user_id"])
     user_public = {k: v for k, v in user.items() if k not in ("password_hash", "_id")}
     return {"access_token": token, "token_type": "bearer", "user": user_public}
+
+
+    from google.oauth2 import id_token
+from google.auth.transport import requests
+
+class GoogleTokenBody(BaseModel):
+    id_token: str
+
+@api.post("/auth/google")
+async def google_login(body: GoogleTokenBody):
+
+    google_user = id_token.verify_oauth2_token(
+        body.id_token,
+        requests.Request(),
+        GOOGLE_CLIENT_ID
+    )
+
+    email = google_user["email"].lower()
+    name = google_user.get("name", "")
+
+    user = await db.users.find_one({"email": email})
+
+    if not user:
+        user_id = f"user_{uuid.uuid4().hex[:12]}"
+
+        await db.users.insert_one({
+            "user_id": user_id,
+            "email": email,
+            "name": name,
+            "auth_provider": "google",
+            "is_admin": False
+        })
+
+        user = await db.users.find_one({"email": email})
+
+    token = create_jwt(user["user_id"])
+
+    return {
+        "access_token": token,
+        "user": user
+    }
 
 
 @api.get("/auth/me")
