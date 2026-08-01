@@ -1574,7 +1574,7 @@ async def update_job_status(job_id: str, request: Request, admin: dict = Depends
 # 2. User ko Premium aur Block karne ke liye API
 from bson import ObjectId
 
-@app.patch("/admin/users/{user_id}")
+@api.patch("/admin/users/{user_id}")
 async def update_user_status(user_id: str, request: Request, admin: dict = Depends(require_admin)):
     data = await request.json()
     
