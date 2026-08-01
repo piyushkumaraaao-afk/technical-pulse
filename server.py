@@ -26,6 +26,7 @@ from crawl4ai import AsyncWebCrawler
 from urllib.parse import urljoin
 from fastapi import BackgroundTasks, APIRouter, Depends
 from pymongo.errors import DuplicateKeyError
+from typing import Optional, List
 
 
 import jwt
@@ -544,13 +545,21 @@ class LoginBody(BaseModel):
 
 class ProfileUpdateBody(BaseModel):
     name: Optional[str] = None
-    phone: Optional[int] = None
+    phone: Optional[str] = None
     qualification: Optional[Qualification] = None
     branch: Optional[Branch] = None
     passout_year: Optional[int] = None
     state: Optional[str] = None
     age: Optional[int] = None
     avatar: Optional[str] = None
+
+class MessageBody(BaseModel):
+    receiver_id: str
+    text: str
+    type: Optional[str] = "text" # 'text' ya 'job'
+    jobData: Optional[dict] = None
+    disappearing_hours: Optional[int] = 0 # 0: Off, 24: 24h, 168: 7d, 720: 30d
+    time: Optional[str] = None    
 
 class JobBody(BaseModel):
     organization: str
@@ -1960,73 +1969,83 @@ async def home():
         ]).limit(10).to_list(10)
     }
 
-from flask import request, jsonify
 from appwrite.id import ID
 from appwrite.query import Query
 
 # 1. MESSAGE SEND KARNE KE LIYE
 from datetime import datetime, timedelta
 
-@app.route('/api/messages', methods=['POST'])
-def send_message():
+@api.get("/api/users/search")
+async def search_users(email: str = "", current_user: dict = Depends(get_current_user)):
     try:
-        data = request.json
-        sender_id = data.get('sender_id')
-        receiver_id = data.get('receiver_id')
-        text = data.get('text')
-        msg_type = data.get('type', 'text')
-        job_data = data.get('jobData', None)
-        disappearing_hours = data.get('disappearing_hours', 0) # 0 means OFF, e.g., 24, 168 (7 days), 720 (30 days)
+        email_query = email.strip().lower()
+        if not email_query:
+            return []
 
-        # Expiry time calculate karein agar enabled hai
-        expires_at = ""
-        if disappearing_hours > 0:
-            expiry_time = datetime.utcnow() + timedelta(hours=int(disappearing_hours))
+        cursor = db.users.find(
+            {
+                "email": {"$regex": email_query, "$options": "i"},
+                "user_id": {"$ne": current_user["user_id"]} # Apne aap ko search mein hide karein
+            },
+            {"_id": 0, "password_hash": 0}
+        ).limit(10)
+
+        users_list = await cursor.to_list(length=10)
+        return users_list
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# --- 4. SEND MESSAGE ENDPOINT (With Disappearing Logic) ---
+@api.post("/api/messages")
+async def send_message(body: MessageBody, user: dict = Depends(get_current_user)):
+    try:
+        sender_id = user["user_id"]
+        
+        # Expiry time calculate karein agar disappearing mode on hai
+        expires_at = None
+        if body.disappearing_hours and body.disappearing_hours > 0:
+            expiry_time = datetime.utcnow() + timedelta(hours=int(body.disappearing_hours))
             expires_at = expiry_time.isoformat()
 
-        response = databases.create_document(
-            DATABASE_ID,
-            MESSAGES_COLLECTION_ID,
-            ID.unique(),
-            {
-                "sender_id": sender_id,
-                "receiver_id": receiver_id,
-                "text": text,
-                "type": msg_type,
-                "job_data": str(job_data) if job_data else "",
-                "created_at": data.get('time', datetime.utcnow().isoformat()),
-                "expires_at": expires_at
-            }
-        )
-        return jsonify(response), 201
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        message_doc = {
+            "sender_id": sender_id,
+            "receiver_id": body.receiver_id,
+            "text": body.text,
+            "type": body.type,
+            "job_data": body.jobData,
+            "created_at": body.time or datetime.utcnow().isoformat(),
+            "expires_at": expires_at
+        }
 
-# 2. DO USERS (YA USER & ADMIN) KE BEECH KI CHAT HISTORY FETCH KARNE KE LIYE
-@app.route('/api/messages/<user1_id>/<user2_id>', methods=['GET'])
-def get_messages(user1_id, user2_id):
+        result = await db.messages.insert_one(message_doc)
+        message_doc["id"] = str(result.inserted_id)
+        if "_id" in message_doc:
+            del message_doc["_id"]
+
+        return message_doc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# --- 5. GET CHAT MESSAGES BETWEEN TWO USERS ---
+@api.get("/api/messages/{other_user_id}")
+async def get_chat_messages(other_user_id: str, current_user: dict = Depends(get_current_user)):
     try:
-        # Dono users ke beech ke saare messages fetch karein
-        # Appwrite query logic for sender/receiver matching
-        response = databases.list_documents(
-            DATABASE_ID,
-            MESSAGES_COLLECTION_ID,
-            [
-                Query.order_asc("created_at")
-            ]
-        )
+        my_id = current_user["user_id"]
         
-        # Filter messages jisme sender aur receiver yeh dono hain
-        all_docs = response['documents']
-        filtered_msgs = [
-            m for m in all_docs 
-            if (m['sender_id'] == user1_id and m['receiver_id'] == user2_id) or 
-               (m['sender_id'] == user2_id and m['receiver_id'] == user1_id)
-        ]
+        # Dono users ke beech ke saare messages fetch karein
+        cursor = db.messages.find({
+            "$or": [
+                {"sender_id": my_id, "receiver_id": other_user_id},
+                {"sender_id": other_user_id, "receiver_id": my_id}
+            ]
+        }, {"_id": 0}).sort("created_at", 1)
 
-        return jsonify(filtered_msgs), 200
+        messages = await cursor.to_list(length=500)
+        return messages
     except Exception as e:
-        return jsonify({"error": str(e)}), 500               
+        raise HTTPException(status_code=500, detail=str(e))               
 
 
 SAMPLE_JOBS = [
