@@ -1958,7 +1958,75 @@ async def home():
             ("applications",-1),
             ("saves",-1)
         ]).limit(10).to_list(10)
-    }            
+    }
+
+from flask import request, jsonify
+from appwrite.id import ID
+from appwrite.query import Query
+
+# 1. MESSAGE SEND KARNE KE LIYE
+from datetime import datetime, timedelta
+
+@app.route('/api/messages', methods=['POST'])
+def send_message():
+    try:
+        data = request.json
+        sender_id = data.get('sender_id')
+        receiver_id = data.get('receiver_id')
+        text = data.get('text')
+        msg_type = data.get('type', 'text')
+        job_data = data.get('jobData', None)
+        disappearing_hours = data.get('disappearing_hours', 0) # 0 means OFF, e.g., 24, 168 (7 days), 720 (30 days)
+
+        # Expiry time calculate karein agar enabled hai
+        expires_at = ""
+        if disappearing_hours > 0:
+            expiry_time = datetime.utcnow() + timedelta(hours=int(disappearing_hours))
+            expires_at = expiry_time.isoformat()
+
+        response = databases.create_document(
+            DATABASE_ID,
+            MESSAGES_COLLECTION_ID,
+            ID.unique(),
+            {
+                "sender_id": sender_id,
+                "receiver_id": receiver_id,
+                "text": text,
+                "type": msg_type,
+                "job_data": str(job_data) if job_data else "",
+                "created_at": data.get('time', datetime.utcnow().isoformat()),
+                "expires_at": expires_at
+            }
+        )
+        return jsonify(response), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# 2. DO USERS (YA USER & ADMIN) KE BEECH KI CHAT HISTORY FETCH KARNE KE LIYE
+@app.route('/api/messages/<user1_id>/<user2_id>', methods=['GET'])
+def get_messages(user1_id, user2_id):
+    try:
+        # Dono users ke beech ke saare messages fetch karein
+        # Appwrite query logic for sender/receiver matching
+        response = databases.list_documents(
+            DATABASE_ID,
+            MESSAGES_COLLECTION_ID,
+            [
+                Query.order_asc("created_at")
+            ]
+        )
+        
+        # Filter messages jisme sender aur receiver yeh dono hain
+        all_docs = response['documents']
+        filtered_msgs = [
+            m for m in all_docs 
+            if (m['sender_id'] == user1_id and m['receiver_id'] == user2_id) or 
+               (m['sender_id'] == user2_id and m['receiver_id'] == user1_id)
+        ]
+
+        return jsonify(filtered_msgs), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500               
 
 
 SAMPLE_JOBS = [
