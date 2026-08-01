@@ -9,6 +9,7 @@ import json
 import httpx
 import hashlib
 import pandas as pd
+import razorpay
 from collections import defaultdict
 from bs4 import BeautifulSoup
 from pathlib import Path
@@ -41,7 +42,6 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
 
-
 # Config
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
 DB_NAME = os.environ.get("DB_NAME", "careerpulse")
@@ -69,6 +69,23 @@ ALLOWED_POST_TYPES = {
     "Job", "Admit Card", "Result", "Scholarship", "Apprenticeship",
     "Internship", "Upcoming Exam", "Answer Key", "IGNORE"
 }
+
+app = FastAPI()
+
+client = razorpay.Client(
+    auth=(
+        os.getenv("RAZORPAY_KEY_ID"),
+        os.getenv("RAZORPAY_KEY_SECRET")
+    )
+)
+
+@app.post("/create-order")
+def create_order():
+    order = client.order.create({
+        "amount": 1000,  # ₹10 = 1000 paise
+        "currency": "INR"
+    })
+    return order
 
 # =======================
 # Bulletproof Helper Functions
@@ -524,8 +541,45 @@ class LoginBody(BaseModel):
     email: EmailStr
     password: str
 
-class GoogleSessionBody(BaseModel):
-    session_id: str
+from google.oauth2 import id_token
+from google.auth.transport import requests
+
+class GoogleTokenBody(BaseModel):
+    id_token: str
+
+@api.post("/auth/google")
+async def google_login(body: GoogleTokenBody):
+
+    google_user = id_token.verify_oauth2_token(
+        body.id_token,
+        requests.Request(),
+        GOOGLE_CLIENT_ID
+    )
+
+    email = google_user["email"].lower()
+    name = google_user.get("name", "")
+
+    user = await db.users.find_one({"email": email})
+
+    if not user:
+        user_id = f"user_{uuid.uuid4().hex[:12]}"
+
+        await db.users.insert_one({
+            "user_id": user_id,
+            "email": email,
+            "name": name,
+            "auth_provider": "google",
+            "is_admin": False
+        })
+
+        user = await db.users.find_one({"email": email})
+
+    token = create_jwt(user["user_id"])
+
+    return {
+        "access_token": token,
+        "user": user
+    }
 
 class ProfileUpdateBody(BaseModel):
     name: Optional[str] = None
@@ -652,14 +706,6 @@ async def require_admin(user: dict = Depends(get_current_user)) -> dict:
         raise HTTPException(status_code=403, detail="Admin access required")
     return user
 
-    raise HTTPException(status_code=401, detail="Invalid or expired token")
-
-async def require_admin(user: dict = Depends(get_current_user)) -> dict:
-    if not user.get("is_admin"):
-        raise HTTPException(status_code=403, detail="Admin access required")
-    return user
-
-
 # =======================
 # Push Helper
 # =======================
@@ -715,13 +761,13 @@ api = APIRouter(prefix="/api")
 async def main_root():
     return {"status": "ok", "message": "CareerPulse Backend Running"}
 
-@app.get("/admin/users")
-async def get_all_users(admin = Depends(require_admin)):
-    users_cursor = db.users.find({})
-    users_list = []
+@api.get("/admin/users")
+async def admin_list_users(admin: dict = Depends(require_admin)):
+    users_cursor = db.users.find({}, {"password_hash": 0})
+    users = []
     async for u in users_cursor:
-        users_list.append({
-            "user_id": str(u.get("user_id") or u.get("_id")), # Ensure ID hamesha jaye
+        users.append({
+            "user_id": str(u.get("user_id") or u.get("_id")),
             "name": u.get("name"),
             "email": u.get("email"),
             "branch": u.get("branch"),
@@ -729,9 +775,13 @@ async def get_all_users(admin = Depends(require_admin)):
             "state": u.get("state"),
             "is_premium": u.get("is_premium", False),
             "is_blocked": u.get("is_blocked", False),
-            "avatar": u.get("avatar")
+            "avatar": u.get("avatar"),
+            "created_at": u.get("created_at")
         })
-    return {"users": users_list}
+    return {
+        "users": users,
+        "count": len(users)
+    }
 
 
 # 2. Server Health Check URL
@@ -765,6 +815,11 @@ async def register(body: RegisterBody):
         "state": None,
         "age": None,
         "avatar": None,
+        "notification_settings": {
+            "job_alert": True,
+            "admit_card": True,
+            "result": True
+        },    
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.users.insert_one(doc)
@@ -803,6 +858,37 @@ async def update_profile(body: ProfileUpdateBody, user: dict = Depends(get_curre
         await db.users.update_one({"user_id": user["user_id"]}, {"$set": updates})
     updated = await db.users.find_one({"user_id": user["user_id"]}, {"_id": 0, "password_hash": 0})
     return {"user": updated}
+
+@api.put("/notification-settings")
+async def update_notification_settings(
+    body: dict,
+    user: dict = Depends(get_current_user)
+):
+    await db.users.update_one(
+        {"user_id": user["user_id"]},
+        {"$set": {
+            "notification_settings": body
+        }}
+    )
+
+    return {"ok": True, "settings": body}
+
+@api.get("/notification-settings")
+async def get_notification_settings(
+    user: dict = Depends(get_current_user)
+):
+    data = await db.users.find_one(
+        {"user_id": user["user_id"]},
+        {"_id":0, "notification_settings":1}
+    )
+
+    return {
+        "settings": data.get("notification_settings", {
+            "job_alert":True,
+            "admit_card":True,
+            "result":True
+        })
+    }        
 
 
 # ---- Jobs ----
@@ -1412,7 +1498,10 @@ async def register_push(body: RegisterPushBody, user: dict = Depends(get_current
 # Yeh aapki backend API file hogi (e.g., main.py ya admin.py)
 
 @api.post("/admin/jobs")
-async def create_admin_job(data: dict):
+async def create_admin_job(
+    data: dict,
+    admin: dict = Depends(require_admin)
+):
     job_id = f"job_{uuid.uuid4().hex[:12]}"
 
     # Har post_type aur post_name ka ekdum unique code banega
@@ -1484,7 +1573,7 @@ async def update_job_status(job_id: str, request: Request, admin: dict = Depends
 from bson import ObjectId
 
 @app.patch("/admin/users/{user_id}")
-async def update_user_status(user_id: str, request: Request):
+async def update_user_status(user_id: str, request: Request, admin: dict = Depends(require_admin)):
     data = await request.json()
     
     update_data = {}
@@ -1526,12 +1615,6 @@ async def admin_update_job(job_id: str, request: Request, admin: dict = Depends(
 async def admin_delete_job(job_id: str, admin: dict = Depends(require_admin)):
     await db.jobs.delete_one({"job_id": job_id})
     return {"ok": True}
-
-
-@api.get("/admin/users")
-async def admin_list_users(admin: dict = Depends(require_admin)):
-    users = await db.users.find({}, {"_id": 0, "password_hash": 0}).to_list(500)
-    return {"users": users, "count": len(users)}
 
 
 @api.get("/admin/stats")
@@ -1593,7 +1676,9 @@ async def admin_refresh_jobs(background_tasks: BackgroundTasks, admin: dict = De
     return {"added": 0, "removed": 0}
 
 @api.get("/admin/analytics")
-async def analytics():
+async def analytics(
+    admin: dict = Depends(require_admin)
+):
     return {
         "top_views": await db.jobs.find({},{"_id":0}).sort("views",-1).limit(5).to_list(5),
         "top_saves": await db.jobs.find({},{"_id":0}).sort("saves",-1).limit(5).to_list(5),
@@ -1605,8 +1690,20 @@ async def analytics():
 # =======================
 @api.delete("/admin/users/{target_user_id}")
 async def admin_delete_user(target_user_id: str, admin: dict = Depends(require_admin)):
+    if target_user_id == admin["user_id"]:
+        raise HTTPException(
+            status_code=400,
+            detail="You cannot delete your own admin account"
+        )
     await db.users.delete_one({"user_id": target_user_id})
-    return {"ok": True, "msg": "User deleted successfully"}
+    await db.applications.delete_many({"user_id": target_user_id})
+    await db.resumes.delete_many({"user_id": target_user_id})
+    await db.chat_messages.delete_many({"user_id": target_user_id})
+    await db.push_devices.delete_many({"user_id": target_user_id})
+    await db.recent_jobs.delete_many({"user_id": target_user_id})
+    await db.feedback.delete_many({"user_id": target_user_id})
+
+    return {"ok": True, "message": "User and all related data deleted successfully"}
 
 @api.post("/feedback")
 async def submit_feedback(body: FeedbackBody, user: dict = Depends(get_current_user)):
@@ -1625,7 +1722,9 @@ async def get_admin_feedback(admin: dict = Depends(require_admin)):
     return {"feedbacks": feedbacks}
 
 @api.get("/admin/top-viewed")
-async def top_viewed():
+async def top_viewed(
+    admin: dict = Depends(require_admin)
+):
     jobs = await db.jobs.find(
         {}, {"_id": 0, "post_name": 1, "organization": 1, "views": 1}
     ).sort("views", -1).limit(10).to_list(10)
@@ -1633,7 +1732,9 @@ async def top_viewed():
     return {"jobs": jobs}
 
 @api.get("/admin/top-saved")
-async def top_saved():
+async def top_saved(
+    admin: dict = Depends(require_admin)
+):
     jobs = await db.jobs.find(
         {}, {"_id": 0, "post_name": 1, "organization": 1, "saves": 1}
     ).sort("saves", -1).limit(10).to_list(10)
@@ -1641,7 +1742,9 @@ async def top_saved():
     return {"jobs": jobs}
 
 @api.get("/admin/top-applied")
-async def top_applied():
+async def top_applied(
+    admin: dict = Depends(require_admin)
+):
     jobs = await db.jobs.find(
         {}, {"_id": 0, "post_name": 1, "organization": 1, "applications": 1}
     ).sort("applications", -1).limit(10).to_list(10)
@@ -1649,7 +1752,9 @@ async def top_applied():
     return {"jobs": jobs}
 
 @api.get("/admin/top-searches")
-async def top_searches():
+async def top_searches(
+    admin: dict = Depends(require_admin)
+):
     data = await db.search_logs.aggregate([
         {"$group":{"_id":"$query","count":{"$sum":1}}},
         {"$sort":{"count":-1}},
