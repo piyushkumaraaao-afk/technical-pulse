@@ -14,7 +14,7 @@ from collections import defaultdict
 from bs4 import BeautifulSoup
 from pathlib import Path
 from datetime import datetime, timedelta, timezone, date
-from typing import List, Optional, Literal, Any, Dist
+from typing import List, Optional, Literal, Any, Dict
 from fastapi.security import HTTPBearer
 from fastapi import HTTPException
 from fastapi import Query
