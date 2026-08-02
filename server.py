@@ -2044,22 +2044,13 @@ async def get_chat_messages(other_user_id: str, current_user: dict = Depends(get
     try:
         my_id = current_user["user_id"]
         
-        # Dono users ke beech ke saare messages fetch karein
+        # 🚀 NAYA: Fetch karte time check karo ki maine message clear toh nahi kar diya
         cursor = db.messages.find({
-            "$and": [
-                {
-                    "$or": [
-                        {"sender_id": my_id, "receiver_id": other_user_id},
-                        {"sender_id": other_user_id, "receiver_id": my_id}
-                    ]
-                },
-                {
-                    "$or": [
-                        {"deleted_for": {"$exists": False}},
-                        {"deleted_for": {"$ne": my_id}}
-                    ]
-                }
-            ]
+            "$or": [
+                {"sender_id": my_id, "receiver_id": other_user_id},
+                {"sender_id": other_user_id, "receiver_id": my_id}
+            ],
+            "deleted_for": {"$ne": my_id} # <-- 🔥 SMART FIX: Jin messages mein meri ID deleted_for mein hai, wo mujhe na dikhayein!
         }, {"_id": 0}).sort("created_at", 1)
 
         messages = await cursor.to_list(length=500)
@@ -2069,7 +2060,7 @@ async def get_chat_messages(other_user_id: str, current_user: dict = Depends(get
 
 class DeleteMessagesBody(BaseModel):
     message_ids: List[str]
-    delete_type: str # "for_me" or "for_everyone"
+    delete_type: str # "for_me" (Clear Chat) ya "for_everyone" (Remove)
 
 class FriendBody(BaseModel):
     friend_id: str
@@ -2121,33 +2112,42 @@ async def get_friends(user: dict = Depends(get_current_user)):
 async def delete_messages(body: DeleteMessagesBody, user: dict = Depends(get_current_user)):
     my_id = user["user_id"]
     
+    if not body.message_ids:
+        return {"message": "No messages to delete"}
+
     # 🚀 SMART FIX: Convert string IDs to MongoDB ObjectIds safely
     obj_ids = []
     for mid in body.message_ids:
         try:
             obj_ids.append(ObjectId(mid))
         except:
-            obj_ids.append(mid) # Agar pehle se string format mein ho toh
+            obj_ids.append(mid) # Agar ID string format mein ho toh
             
-    # Dono type ki ID match karne ka filter
+    # Filter jo ObjectId aur string dono type ki IDs pakad lega
     query_filter = {"$or": [{"_id": {"$in": obj_ids}}, {"id": {"$in": body.message_ids}}]}
 
-    if body.delete_type == "for_me":
+    if body.delete_type == "for_everyone":
+        # 🚀 REMOVE BUTTON: Dono users ke liye message delete (Replace with "deleted" text)
+        await db.messages.update_many(
+            query_filter,
+            {"$set": {
+                "text": "🚫 This message was deleted",
+                "is_deleted_for_everyone": True,
+                "type": "text", # Agar job card tha, toh normal text ban jayega
+                "job_data": None
+            }}
+        )
+        return {"message": "Messages removed for everyone"}
+
+    elif body.delete_type == "for_me":
+        # 🚀 CLEAR CHAT: Sirf current user ke 'deleted_for' array mein ID add karo
         await db.messages.update_many(
             query_filter,
             {"$addToSet": {"deleted_for": my_id}}
         )
-    elif body.delete_type == "for_everyone":
-        # Delete for everyone sirf sender kar sakta hai
-        await db.messages.update_many(
-            {"$and": [query_filter, {"sender_id": my_id}]},
-            {"$set": {
-                "text": "🚫 This message was deleted",
-                "is_deleted_for_everyone": True,
-                "type": "text"
-            }}
-        )
-    return {"message": "Messages deleted successfully"}                       
+        return {"message": "Chat cleared for you"}
+
+    return {"message": "Invalid operation"}                       
 
 
 SAMPLE_JOBS = [
