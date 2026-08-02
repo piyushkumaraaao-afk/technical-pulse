@@ -2022,7 +2022,13 @@ async def send_message(body: MessageBody, user: dict = Depends(get_current_user)
         }
 
         result = await db.messages.insert_one(message_doc)
-        message_doc["id"] = str(result.inserted_id)
+
+    await db.messages.update_one(
+        {"_id": result.inserted_id},
+        {"$set": {"id": str(result.inserted_id)}}
+    )
+
+    message_doc["id"] = str(result.inserted_id)
         if "_id" in message_doc:
             del message_doc["_id"]
 
@@ -2039,9 +2045,19 @@ async def get_chat_messages(other_user_id: str, current_user: dict = Depends(get
         
         # Dono users ke beech ke saare messages fetch karein
         cursor = db.messages.find({
-            "$or": [
-                {"sender_id": my_id, "receiver_id": other_user_id},
-                {"sender_id": other_user_id, "receiver_id": my_id}
+            "$and": [
+                {
+                    "$or": [
+                        {"sender_id": my_id, "receiver_id": other_user_id},
+                        {"sender_id": other_user_id, "receiver_id": my_id}
+                    ]
+                },
+                {
+                    "$or": [
+                        {"deleted_for": {"$exists": False}},
+                        {"deleted_for": {"$ne": my_id}}
+                    ]
+                }
             ]
         }, {"_id": 0}).sort("created_at", 1)
 
