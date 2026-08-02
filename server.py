@@ -561,7 +561,11 @@ class MessageBody(BaseModel):
     type: Optional[str] = "text" # 'text' ya 'job'
     jobData: Optional[dict] = None
     disappearing_hours: Optional[int] = 0 # 0: Off, 24: 24h, 168: 7d, 720: 30d
-    time: Optional[str] = None    
+    time: Optional[str] = None
+
+class EditMessageBody(BaseModel):
+    message_id: str
+    new_text: str  
 
 class JobBody(BaseModel):
     organization: str
@@ -2147,7 +2151,29 @@ async def delete_messages(body: DeleteMessagesBody, user: dict = Depends(get_cur
         )
         return {"message": "Chat cleared for you"}
 
-    return {"message": "Invalid operation"}                       
+    return {"message": "Invalid operation"}
+
+@api.put("/api/messages/edit")
+async def edit_message(body: EditMessageBody, user: dict = Depends(get_current_user)):
+    my_id = user["user_id"]
+    
+    # ObjectId conversion safety
+    try:
+        obj_id = ObjectId(body.message_id)
+        query = {"$or": [{"_id": obj_id}, {"id": body.message_id}], "sender_id": my_id}
+    except:
+        query = {"id": body.message_id, "sender_id": my_id}
+
+    # Sirf wahi message edit ho sakta hai jo current user ne bheja ho
+    result = await db.messages.update_one(
+        query,
+        {"$set": {"text": body.new_text}}
+    )
+    
+    if result.modified_count == 0:
+        raise HTTPException(status_code=403, detail="Message cannot be edited or not found")
+        
+    return {"message": "Message updated successfully"}                           
 
 
 SAMPLE_JOBS = [
