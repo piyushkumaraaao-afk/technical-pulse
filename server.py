@@ -534,9 +534,10 @@ Branch = Literal[
 JobCategory = Literal["Government", "PSU", "Apprenticeship", "Private", "Internship", "Diploma Eligible"]
 
 class RegisterBody(BaseModel):
+    name: str
     email: EmailStr
     password: str
-    name: str
+    phone: Optional[str] = None
 
 class LoginBody(BaseModel):
     email: EmailStr
@@ -741,6 +742,7 @@ async def admin_list_users(admin: dict = Depends(require_admin)):
             "name": u.get("name"),
             "email": u.get("email"),
             "branch": u.get("branch"),
+            "phone": u.get("phone number"),
             "qualification": u.get("qualification"),
             "state": u.get("state"),
             "is_premium": u.get("is_premium", False),
@@ -775,7 +777,7 @@ async def register(body: RegisterBody):
         "user_id": user_id,
         "email": body.email.lower(),
         "name": body.name,
-        "phone": body.phone,
+        "phone": getattr(body, 'phone', None),
         "password_hash": hash_password(body.password),
         "auth_provider": "email",
         "is_admin": False,
