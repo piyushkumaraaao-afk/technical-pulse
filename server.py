@@ -14,7 +14,7 @@ from collections import defaultdict
 from bs4 import BeautifulSoup
 from pathlib import Path
 from datetime import datetime, timedelta, timezone, date
-from typing import List, Optional, Literal, Any
+from typing import List, Optional, Literal, Any, Dist
 from fastapi.security import HTTPBearer
 from fastapi import HTTPException
 from fastapi import Query
@@ -742,7 +742,7 @@ async def admin_list_users(admin: dict = Depends(require_admin)):
             "name": u.get("name"),
             "email": u.get("email"),
             "branch": u.get("branch"),
-            "phone": u.get("phone number"),
+            "phone": u.get("phone"),
             "qualification": u.get("qualification"),
             "state": u.get("state"),
             "is_premium": u.get("is_premium", False),
