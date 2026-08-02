@@ -2004,8 +2004,7 @@ async def search_users(email: str = "", current_user: dict = Depends(get_current
 async def send_message(body: MessageBody, user: dict = Depends(get_current_user)):
     try:
         sender_id = user["user_id"]
-        
-        # Expiry time calculate karein agar disappearing mode on hai
+
         expires_at = None
         if body.disappearing_hours and body.disappearing_hours > 0:
             expiry_time = datetime.utcnow() + timedelta(hours=int(body.disappearing_hours))
@@ -2023,16 +2022,18 @@ async def send_message(body: MessageBody, user: dict = Depends(get_current_user)
 
         result = await db.messages.insert_one(message_doc)
 
-    await db.messages.update_one(
-        {"_id": result.inserted_id},
-        {"$set": {"id": str(result.inserted_id)}}
-    )
+        await db.messages.update_one(
+            {"_id": result.inserted_id},
+            {"$set": {"id": str(result.inserted_id)}}
+        )
 
-    message_doc["id"] = str(result.inserted_id)
+        message_doc["id"] = str(result.inserted_id)
+
         if "_id" in message_doc:
             del message_doc["_id"]
 
         return message_doc
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
