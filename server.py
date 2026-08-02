@@ -2047,7 +2047,84 @@ async def get_chat_messages(other_user_id: str, current_user: dict = Depends(get
         messages = await cursor.to_list(length=500)
         return messages
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))               
+        raise HTTPException(status_code=500, detail=str(e))
+
+class DeleteMessagesBody(BaseModel):
+    message_ids: List[str]
+    delete_type: str # "for_me" or "for_everyone"
+
+class FriendBody(BaseModel):
+    friend_id: str
+
+# ==========================================
+# 1. ADD / REMOVE FRIEND ENDPOINTS
+# ==========================================
+@api.post("/api/friends/add")
+async def add_friend(body: FriendBody, user: dict = Depends(get_current_user)):
+    my_id = user["user_id"]
+    friend_id = body.friend_id
+    
+    # Dono users ke 'friends' array mein ek dusre ko add karo
+    await db.users.update_one({"user_id": my_id}, {"$addToSet": {"friends": friend_id}})
+    await db.users.update_one({"user_id": friend_id}, {"$addToSet": {"friends": my_id}})
+    
+    return {"message": "Friend added successfully"}
+
+@api.post("/api/friends/remove")
+async def remove_friend(body: FriendBody, user: dict = Depends(get_current_user)):
+    my_id = user["user_id"]
+    friend_id = body.friend_id
+    
+    # Dono users ke 'friends' array se ek dusre ko remove karo
+    await db.users.update_one({"user_id": my_id}, {"$pull": {"friends": friend_id}})
+    await db.users.update_one({"user_id": friend_id}, {"$pull": {"friends": my_id}})
+    
+    return {"message": "Friend removed successfully"}
+
+@api.get("/api/friends")
+async def get_friends(user: dict = Depends(get_current_user)):
+    my_id = user["user_id"]
+    # User ka document nikalo
+    me = await db.users.find_one({"user_id": my_id})
+    friend_ids = me.get("friends", [])
+    
+    if not friend_ids:
+        return []
+        
+    # Un sabhi doston ka data fetch karo
+    cursor = db.users.find({"user_id": {"$in": friend_ids}}, {"_id": 0, "password_hash": 0})
+    friends_list = await cursor.to_list(length=100)
+    return friends_list
+
+# ==========================================
+# 2. DELETE MESSAGES (For Me / For Everyone)
+# ==========================================
+@api.post("/api/messages/delete")
+async def delete_messages(body: DeleteMessagesBody, user: dict = Depends(get_current_user)):
+    my_id = user["user_id"]
+    
+    # MongoDB ObjectIds mein convert karne ki zaroorat nahi agar aap message id ko string mein save kar rahe ho
+    # Agar "_id" se save ho raha hai toh bson.ObjectId use karna padega. Yahan string assume kar rahe hain.
+    
+    if body.delete_type == "for_me":
+        # Delete for me: 'deleted_for' array mein apni ID daal do
+        await db.messages.update_many(
+            {"id": {"$in": body.message_ids}},
+            {"$addToSet": {"deleted_for": my_id}}
+        )
+    
+    elif body.delete_type == "for_everyone":
+        # Delete for everyone: Sirf wo messages delete kar sakta hai jo usne bheje hain
+        await db.messages.update_many(
+            {"id": {"$in": body.message_ids}, "sender_id": my_id},
+            {"$set": {
+                "text": "🚫 This message was deleted",
+                "is_deleted_for_everyone": True,
+                "type": "text" # Agar job share kiya tha toh usko normal text bana do
+            }}
+        )
+    
+    return {"message": "Messages deleted"}                       
 
 
 SAMPLE_JOBS = [
