@@ -27,6 +27,7 @@ from urllib.parse import urljoin
 from fastapi import BackgroundTasks, APIRouter, Depends
 from pymongo.errors import DuplicateKeyError
 from typing import Optional, List
+from bson import ObjectId
 
 
 import jwt
@@ -2103,28 +2104,33 @@ async def get_friends(user: dict = Depends(get_current_user)):
 async def delete_messages(body: DeleteMessagesBody, user: dict = Depends(get_current_user)):
     my_id = user["user_id"]
     
-    # MongoDB ObjectIds mein convert karne ki zaroorat nahi agar aap message id ko string mein save kar rahe ho
-    # Agar "_id" se save ho raha hai toh bson.ObjectId use karna padega. Yahan string assume kar rahe hain.
-    
+    # 🚀 SMART FIX: Convert string IDs to MongoDB ObjectIds safely
+    obj_ids = []
+    for mid in body.message_ids:
+        try:
+            obj_ids.append(ObjectId(mid))
+        except:
+            obj_ids.append(mid) # Agar pehle se string format mein ho toh
+            
+    # Dono type ki ID match karne ka filter
+    query_filter = {"$or": [{"_id": {"$in": obj_ids}}, {"id": {"$in": body.message_ids}}]}
+
     if body.delete_type == "for_me":
-        # Delete for me: 'deleted_for' array mein apni ID daal do
         await db.messages.update_many(
-            {"id": {"$in": body.message_ids}},
+            query_filter,
             {"$addToSet": {"deleted_for": my_id}}
         )
-    
     elif body.delete_type == "for_everyone":
-        # Delete for everyone: Sirf wo messages delete kar sakta hai jo usne bheje hain
+        # Delete for everyone sirf sender kar sakta hai
         await db.messages.update_many(
-            {"id": {"$in": body.message_ids}, "sender_id": my_id},
+            {"$and": [query_filter, {"sender_id": my_id}]},
             {"$set": {
                 "text": "🚫 This message was deleted",
                 "is_deleted_for_everyone": True,
-                "type": "text" # Agar job share kiya tha toh usko normal text bana do
+                "type": "text"
             }}
         )
-    
-    return {"message": "Messages deleted"}                       
+    return {"message": "Messages deleted successfully"}                       
 
 
 SAMPLE_JOBS = [
