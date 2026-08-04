@@ -637,6 +637,9 @@ class AdminNotifyBody(BaseModel):
 class FeedbackBody(BaseModel):
     message: str
 
+class UpgradePremiumBody(BaseModel):
+    payment_id: str    
+
 # =======================
 # Auth Utilities
 # =======================
@@ -2173,7 +2176,25 @@ async def edit_message(body: EditMessageBody, user: dict = Depends(get_current_u
     if result.modified_count == 0:
         raise HTTPException(status_code=403, detail="Message cannot be edited or not found")
         
-    return {"message": "Message updated successfully"}                           
+    return {"message": "Message updated successfully"}
+
+@api.post("/api/users/upgrade")
+async def upgrade_to_premium(body: UpgradePremiumBody, user: dict = Depends(get_current_user)):
+    my_id = user["user_id"]
+    
+    # 🚀 Yahan Razorpay payment verify hoti hai backend level par (Optional but recommended for production)
+    # Abhi ke liye hum seedha database mein is_premium = True kar rahe hain
+    
+    result = await db.users.update_one(
+        {"user_id": my_id},
+        {"$set": {"is_premium": True}}
+    )
+    
+    if result.modified_count == 0:
+        # Agar already premium hai ya user nahi mila
+        pass
+        
+    return {"message": "Welcome to Premium!", "is_premium": True}                               
 
 
 SAMPLE_JOBS = [
