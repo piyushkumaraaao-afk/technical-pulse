@@ -641,7 +641,15 @@ class FeedbackBody(BaseModel):
     message: str
 
 class UpgradePremiumBody(BaseModel):
-    payment_id: str    
+    payment_id: str
+
+# Razorpay client setup karein
+razorpay_client = razorpay.Client(auth=("YOUR_KEY_ID", "YOUR_KEY_SECRET"))
+
+class PaymentVerifyBody(BaseModel):
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str    
 
 # =======================
 # Auth Utilities
@@ -2238,7 +2246,36 @@ async def razorpay_webhook(request: Request, x_razorpay_signature: str = Header(
         except KeyError:
             print("⚠️ Email not found in Razorpay payload")
 
-    return {"status": "ok"}                                   
+    return {"status": "ok"}
+
+@api.post("/verify-payment")
+async def verify_payment(body: PaymentVerifyBody, user: dict = Depends(get_current_user)):
+    try:
+        # 1. Razorpay se signature verify karein (Taaki koi fake request na bhej sake)
+        razorpay_client.utility.verify_payment_signature({
+            'razorpay_order_id': body.razorpay_order_id,
+            'razorpay_payment_id': body.razorpay_payment_id,
+            'razorpay_signature': body.razorpay_signature
+        })
+        
+        # 2. Agar signature sahi hai, toh Database mein user ko Premium update karein
+        update_result = await db.users.update_one(
+            {"user_id": user["user_id"]},
+            {"$set": {
+                "is_premium": True,
+                "premium_activated_at": datetime.now(timezone.utc).isoformat()
+            }}
+        )
+
+        if update_result.modified_count == 0:
+            raise HTTPException(status_code=400, detail="Failed to update user status in Database")
+
+        return {"success": True, "message": "Payment verified! User is now Premium."}
+
+    except razorpay.errors.SignatureVerificationError:
+        raise HTTPException(status_code=400, detail="Payment verification failed. Invalid signature.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))                                       
 
 
 SAMPLE_JOBS = [
