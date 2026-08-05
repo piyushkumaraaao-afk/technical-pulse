@@ -614,6 +614,8 @@ class ResumeBody(BaseModel):
     skills: List[str] = Field(default_factory=list)
     certifications: List[str] = Field(default_factory=list)
     template: str = "modern"
+    layoutStyle: Optional[str] = "layout1"  # 🚀 Added to receive layout 1 to 6
+    colorTheme: Optional[str] = "modern"
 
 class ChatBody(BaseModel):
     message: str
