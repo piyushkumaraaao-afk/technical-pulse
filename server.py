@@ -10,6 +10,7 @@ import httpx
 import hashlib
 import pandas as pd
 import razorpay
+import hmac
 from collections import defaultdict
 from bs4 import BeautifulSoup
 from pathlib import Path
@@ -2194,7 +2195,48 @@ async def upgrade_to_premium(body: UpgradePremiumBody, user: dict = Depends(get_
         # Agar already premium hai ya user nahi mila
         pass
         
-    return {"message": "Welcome to Premium!", "is_premium": True}                               
+    return {"message": "Welcome to Premium!", "is_premium": True}
+
+@api.post("/api/razorpay-webhook")
+async def razorpay_webhook(request: Request, x_razorpay_signature: str = Header(None)):
+    # 1. Razorpay se aaya hua raw data read karein
+    payload = await request.body()
+    
+    # 2. Apna Webhook Secret yahan daalein (Jo Razorpay dashboard me set kiya tha)
+    secret = "MySecretKey123" 
+    
+    # 3. Security Check: Validate Signature (Taaki koi fake payment na bhej sake)
+    expected_signature = hmac.new(
+        bytes(secret, 'utf-8'),
+        msg=payload,
+        digestmod=hashlib.sha256
+    ).hexdigest()
+
+    if expected_signature != x_razorpay_signature:
+        raise HTTPException(status_code=400, detail="Invalid Razorpay Signature")
+
+    # 4. Data ko JSON mein convert karein
+    data = json.loads(payload)
+    event = data.get("event")
+
+    # 5. Agar event payment success ka hai
+    if event in ["payment.captured", "payment.link.paid"]:
+        try:
+            # User ka email nikalein (Jo app se link mein attach ho kar aaya tha)
+            user_email = data["payload"]["payment"]["entity"]["email"]
+            
+            # 6. Database mein is_premium = True kar dein
+            if user_email:
+                result = await db.users.update_one(
+                    {"email": user_email},
+                    {"$set": {"is_premium": True}}
+                )
+                print(f"✅ Premium unlocked successfully for: {user_email}")
+                
+        except KeyError:
+            print("⚠️ Email not found in Razorpay payload")
+
+    return {"status": "ok"}                                   
 
 
 SAMPLE_JOBS = [
