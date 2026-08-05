@@ -647,9 +647,7 @@ class UpgradePremiumBody(BaseModel):
 razorpay_client = razorpay.Client(auth=("YOUR_KEY_ID", "YOUR_KEY_SECRET"))
 
 class PaymentVerifyBody(BaseModel):
-    razorpay_order_id: str
-    razorpay_payment_id: str
-    razorpay_signature: str    
+    email: str
 
 # =======================
 # Auth Utilities
@@ -2249,33 +2247,26 @@ async def razorpay_webhook(request: Request, x_razorpay_signature: str = Header(
     return {"status": "ok"}
 
 @api.post("/verify-payment")
-async def verify_payment(body: PaymentVerifyBody, user: dict = Depends(get_current_user)):
-    try:
-        # 1. Razorpay se signature verify karein (Taaki koi fake request na bhej sake)
-        razorpay_client.utility.verify_payment_signature({
-            'razorpay_order_id': body.razorpay_order_id,
-            'razorpay_payment_id': body.razorpay_payment_id,
-            'razorpay_signature': body.razorpay_signature
-        })
+async def verify_payment(body: VerifyPaymentBody, user: dict = Depends(get_current_user)):
+    # 1. Database mein us user ka record find karein
+    user_db = await db.users.find_one({"email": body.email})
+    
+    # 2. Agar user nahi milta
+    if not user_db:
+        raise HTTPException(status_code=404, detail="User not found")
         
-        # 2. Agar signature sahi hai, toh Database mein user ko Premium update karein
-        update_result = await db.users.update_one(
-            {"user_id": user["user_id"]},
-            {"$set": {
-                "is_premium": True,
-                "premium_activated_at": datetime.now(timezone.utc).isoformat()
-            }}
-        )
-
-        if update_result.modified_count == 0:
-            raise HTTPException(status_code=400, detail="Failed to update user status in Database")
-
-        return {"success": True, "message": "Payment verified! User is now Premium."}
-
-    except razorpay.errors.SignatureVerificationError:
-        raise HTTPException(status_code=400, detail="Payment verification failed. Invalid signature.")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))                                       
+    # 3. Check karein ki Webhook ne is_premium ko True kiya ya nahi
+    if user_db.get("is_premium") == True:
+        return {
+            "success": True, 
+            "message": "Premium verified successfully!"
+        }
+    else:
+        # Agar payment process mein delay hai ya webhook nahi aaya abhi tak
+        return {
+            "success": False, 
+            "message": "Payment not received yet. Please wait a minute or refresh."
+        }                                       
 
 
 SAMPLE_JOBS = [
