@@ -646,6 +646,11 @@ class FeedbackBody(BaseModel):
 class UpgradePremiumBody(BaseModel):
     payment_id: str
 
+class AdSlot(BaseModel):
+    id: str
+    image: str
+    link: str    
+
 # Razorpay client setup karein
 razorpay_client = razorpay.Client(auth=("YOUR_KEY_ID", "YOUR_KEY_SECRET"))
 
@@ -2327,14 +2332,18 @@ async def get_ads():
 
 # 2. Save Ads (Admin Panel se save karne ke liye)
 @api.post("/admin/ads")
-async def save_admin_ads(request: Request, admin: dict = Depends(require_admin)):
-    data = await request.json()
-    ads_data = data.get("ads", [])
+async def save_admin_ads(payload: AdsPayload, admin: dict = Depends(require_admin)):
+    # 💡 Pydantic automatically React Native ke data ko parse kar lega
+    ads_data = [{"id": ad.id, "image": ad.image, "link": ad.link} for ad in payload.ads]
     
+    # Terminal mein check karne ke liye print laga diya hai
+    print("🚀 RECEIVED ADS DATA:", ads_data) 
+    
+    # Purane ads hata kar naye save karein
     await db.ads.delete_many({})
     await db.ads.insert_one({"ads": ads_data})
     
-    return {"success": True, "message": "Ads updated successfully"}
+    return {"success": True, "message": "Ads properly saved to MongoDB"}
 
 # 3. Upload Ad Image (Gallery preview ke liye)
 @api.post("/admin/upload-ad-image")
