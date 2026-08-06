@@ -2270,24 +2270,36 @@ async def verify_payment(body: VerifyPaymentBody, user: dict = Depends(get_curre
         }
 
 @api.get("/api/jobs/for-you")
-async def get_jobs_for_you(user: dict = Depends(get_current_user)):
+async def for_you(user: dict = Depends(get_current_user)):
     try:
-        # Aap yahan user ki profile (jaise qualification, branch, state) ke hisaab se jobs filter kar sakte hain
         user_branch = user.get("branch", [])
+        user_qual = user.get("qualification", [])
+
+        # Agar user ki branch/qualification list hai ya string, usko safely handle karein
+        branch_list = user_branch if isinstance(user_branch, list) else [user_branch] if user_branch else []
+        qual_list = user_qual if isinstance(user_qual, list) else [user_qual] if user_qual else []
+
+        query = {"is_active": True}
         
-        # Database se jobs fetch karein (Example query)
-        # Agar user ki branch saved hai toh usse match karte hue jobs bhejein, warna saari jobs de dein
-        query = {"branch": {"$in": user_branch}} if user_branch else {}
-        jobs = await db.jobs.find(query).limit(10).to_list(10)
-        
-        # Agar koi specific job ID ka error aa raha tha ya list bhejni hai:
+        if branch_list or qual_list:
+            or_conditions = []
+            if branch_list:
+                or_conditions.append({"branches": {"$in": branch_list}})
+            if qual_list:
+                or_conditions.append({"qualifications": {"$in": qual_list}})
+            query["$or"] = or_conditions
+
+        jobs = await db.jobs.find(query, {"_id": 0}).sort("trending_score", -1).limit(20).to_list(20)
+
+        # 🚀 Agar match karne par ek bhi job na mile, toh latest 20 active jobs bhej do taaki 404 error kabhi na aaye!
         if not jobs:
-            # Agar ek bhi job nahi mili toh empty list ya default response return karein
-            return []
-            
-        return jobs
+            jobs = await db.jobs.find({"is_active": True}, {"_id": 0}).sort("trending_score", -1).limit(20).to_list(20)
+
+        return {"jobs": jobs}
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))                                               
+        # Koi bhi error ho, app crash na ho isliye safe khali list bhej do
+        return {"jobs": []}                                               
 
 
 SAMPLE_JOBS = [
