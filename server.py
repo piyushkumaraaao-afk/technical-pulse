@@ -29,6 +29,9 @@ from fastapi import BackgroundTasks, APIRouter
 from pymongo.errors import DuplicateKeyError
 from typing import Optional, List
 from bson import ObjectId
+from flask import Flask, request, jsonify, url_for
+from werkzeug.utils import secure_filename
+from flask import send_from_directory
 
 
 import jwt
@@ -61,7 +64,7 @@ logger = logging.getLogger("careerpulse")
 # Mongo
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
-_push_client = None
+_push_client = None                          
 
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
@@ -2299,7 +2302,70 @@ async def for_you(user: dict = Depends(get_current_user)):
         
     except Exception as e:
         # Koi bhi error ho, app crash na ho isliye safe khali list bhej do
-        return {"jobs": []}                                               
+        return {"jobs": []}
+
+UPLOAD_FOLDER = 'uploads'
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+# 1. Get Ads API (Users aur Admin ke liye home screen par show karne ke liye)
+@app.route('/ads', methods=['GET'])
+def get_ads():
+    try:
+        # Latest saved ads document fetch karo
+        ad_doc = db.ads.find_one(sort=[('_id', -1)])
+        if ad_doc:
+            ad_doc['_id'] = str(ad_doc['_id']) # ObjectId ko string me convert karna zaroori hai
+            return jsonify(ad_doc), 200
+        return jsonify({"ads": []}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# 2. Save/Update Ads API (Admin dashboard se 6 slots save karne ke liye)
+@app.route('/admin/ads', methods=['POST'])
+def save_admin_ads():
+    try:
+        data = request.get_json()
+        ads_data = data.get('ads', [])
+        
+        # Purane ads hata kar naye save karlo ya update karo
+        db.ads.delete_many({}) # Sab clear karke latest save kar rahe hain
+        db.ads.insert_one({"ads": ads_data})
+        
+        return jsonify({"success": True, "message": "Ads updated successfully!"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# 3. Upload Ad Image API (+ button dabane par image server par save hone ke liye)
+@app.route('/admin/upload-ad-image', methods=['POST'])
+def upload_ad_image():
+    try:
+        if 'image' not in request.files:
+            return jsonify({"error": "No image file provided"}), 400
+        
+        file = request.files['image']
+        if file.filename == '':
+            return jsonify({"error": "No selected file"}), 400
+            
+        if file:
+            filename = secure_filename(file.filename)
+            # Unique filename banane ke liye timestamp ya uuid bhi laga sakte hain
+            filepath = os.path.join(UPLOAD_FOLDER, filename)
+            file.save(filepath)
+            
+            # Image ka public URL generate karo jo app mein dikhega
+            image_url = f"{request.host_url}uploads/{filename}"
+            
+            return jsonify({"success": True, "url": image_url}), 200
+            
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/uploads/<filename>')
+def uploaded_file(filename):
+    return send_from_directory(UPLOAD_FOLDER, filename)                                                               
 
 
 SAMPLE_JOBS = [
