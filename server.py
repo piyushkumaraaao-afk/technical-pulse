@@ -549,8 +549,8 @@ class LoginBody(BaseModel):
 class ProfileUpdateBody(BaseModel):
     name: Optional[str] = None
     phone: Optional[str] = None
-    qualification: Optional[Qualification] = None
-    branch: Optional[Branch] = None
+    qualification: Optional[List[str]] = None 
+    branch: Optional[List[str]] = None
     passout_year: Optional[int] = None
     state: Optional[str] = None
     age: Optional[int] = None
