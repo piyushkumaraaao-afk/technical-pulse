@@ -17,7 +17,7 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone, date
 from typing import List, Optional, Literal, Any, Dict
 from fastapi.security import HTTPBearer
-from fastapi import FastAPI, Request, HTTPException, Header
+from fastapi import FastAPI, Request, UploadFile, File, Depends, HTTPException, Header
 from fastapi import Query
 from io import BytesIO
 import random
