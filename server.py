@@ -649,7 +649,10 @@ class UpgradePremiumBody(BaseModel):
 class AdSlot(BaseModel):
     id: str
     image: str
-    link: str    
+    link: str
+
+class AdsPayload(BaseModel):
+    ads: List[AdSlot]        
 
 # Razorpay client setup karein
 razorpay_client = razorpay.Client(auth=("YOUR_KEY_ID", "YOUR_KEY_SECRET"))
