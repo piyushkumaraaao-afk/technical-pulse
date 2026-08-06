@@ -2267,7 +2267,27 @@ async def verify_payment(body: VerifyPaymentBody, user: dict = Depends(get_curre
         return {
             "success": False, 
             "message": "Payment not received yet. Please wait a minute or refresh."
-        }                                       
+        }
+
+@api.get("/api/jobs/for-you")
+async def get_jobs_for_you(user: dict = Depends(get_current_user)):
+    try:
+        # Aap yahan user ki profile (jaise qualification, branch, state) ke hisaab se jobs filter kar sakte hain
+        user_branch = user.get("branch", [])
+        
+        # Database se jobs fetch karein (Example query)
+        # Agar user ki branch saved hai toh usse match karte hue jobs bhejein, warna saari jobs de dein
+        query = {"branch": {"$in": user_branch}} if user_branch else {}
+        jobs = await db.jobs.find(query).limit(10).to_list(10)
+        
+        # Agar koi specific job ID ka error aa raha tha ya list bhejni hai:
+        if not jobs:
+            # Agar ek bhi job nahi mili toh empty list ya default response return karein
+            return []
+            
+        return jobs
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))                                               
 
 
 SAMPLE_JOBS = [
