@@ -1721,12 +1721,21 @@ async def analytics(
 # =======================
 @api.delete("/admin/users/{target_user_id}")
 async def admin_delete_user(target_user_id: str, admin: dict = Depends(require_admin)):
-    if target_user_id == admin["user_id"]:
+    if target_user_id == admin.get("user_id"):
         raise HTTPException(
             status_code=400,
             detail="You cannot delete your own admin account"
         )
-    await db.users.delete_one({"user_id": target_user_id})
+        
+    # 💡 Smart Query: user_id aur MongoDB _id dono ko check karega
+    query = {"$or": [{"user_id": target_user_id}]}
+    if ObjectId.is_valid(target_user_id):
+        query["$or"].append({"_id": ObjectId(target_user_id)})
+
+    # Ab user 100% delete hoga
+    await db.users.delete_one(query)
+    
+    # Baki related data delete
     await db.applications.delete_many({"user_id": target_user_id})
     await db.resumes.delete_many({"user_id": target_user_id})
     await db.chat_messages.delete_many({"user_id": target_user_id})
@@ -2304,127 +2313,45 @@ async def for_you(user: dict = Depends(get_current_user)):
         # Koi bhi error ho, app crash na ho isliye safe khali list bhej do
         return {"jobs": []}
 
-UPLOAD_FOLDER = 'uploads'
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+UPLOAD_DIR = "uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# 1. Get Ads API (Users aur Admin ke liye)
-@app.route('/ads', methods=['GET'])
-def get_ads():
-    try:
-        ad_doc = db.ads.find_one(sort=[('_id', -1)])
-        if ad_doc and 'ads' in ad_doc:
-            ad_doc['_id'] = str(ad_doc['_id'])
-            return jsonify(ad_doc), 200
-        return jsonify({"ads": []}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+# 1. Get Ads (Users aur Admin ke liye)
+@api.get("/ads")
+async def get_ads():
+    ad_doc = await db.ads.find_one(sort=[('_id', -1)])
+    if ad_doc and "ads" in ad_doc:
+        ad_doc["_id"] = str(ad_doc["_id"])
+        return ad_doc
+    return {"ads": []}
 
-# 2. Save/Update Ads API (Admin ke 6 slots save karne ke liye)
-@app.route('/admin/ads', methods=['POST'])
-def save_admin_ads():
-    try:
-        data = request.get_json()
-        ads_data = data.get('ads', [])
-        
-        # Database mein purane ads hata kar naye save karo
-        db.ads.delete_many({})
-        db.ads.insert_one({"ads": ads_data})
-        
-        return jsonify({"success": True, "message": "Ads updated successfully!"}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+# 2. Save Ads (Admin Panel se save karne ke liye)
+@api.post("/admin/ads")
+async def save_admin_ads(request: Request, admin: dict = Depends(require_admin)):
+    data = await request.json()
+    ads_data = data.get("ads", [])
+    
+    await db.ads.delete_many({})
+    await db.ads.insert_one({"ads": ads_data})
+    
+    return {"success": True, "message": "Ads updated successfully"}
 
-# 3. Upload Ad Image API
-@app.route('/admin/upload-ad-image', methods=['POST'])
-def upload_ad_image():
-    try:
-        if 'image' not in request.files:
-            return jsonify({"error": "No image file provided"}), 400
-        
-        file = request.files['image']
-        if file.filename == '':
-            return jsonify({"error": "No selected file"}), 400
-            
-        if file:
-            filename = secure_filename(file.filename)
-            filepath = os.path.join(UPLOAD_FOLDER, filename)
-            file.save(filepath)
-            
-            # Sahi URL format generate karne ke liye
-            image_url = f"{request.host_url.rstrip('/')}/uploads/{filename}"
-            return jsonify({"success": True, "url": image_url}), 200
-            
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/uploads/<filename>')
-def uploaded_file(filename):
-    return send_from_directory(UPLOAD_FOLDER, filename)
-
-# 1. GET ALL USERS API (Dashboard mein users dikhane ke liye)
-@app.route('/admin/users', methods=['GET'])
-def get_all_users():
-    try:
-        # Database se saare users fetch karo (latest pehle)
-        users_cursor = db.users.find().sort('_id', -1)
-        users_list = []
-        
-        for user in users_cursor:
-            user['_id'] = str(user['_id']) # MongoDB ke ID ko string banayein
-            
-            # Security: Password waghera frontend par na bhejein
-            if 'password' in user:
-                del user['password']
-                
-            users_list.append(user)
-            
-        return jsonify({"users": users_list}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-# 2. DELETE USER API (User ko hamesha ke liye delete karne ke liye)
-@app.route('/admin/users/<user_id>', methods=['DELETE'])
-def delete_user_admin(user_id):
-    try:
-        result = db.users.delete_one({'_id': ObjectId(user_id)})
-        if result.deleted_count > 0:
-            return jsonify({"success": True, "message": "User deleted"}), 200
-        else:
-            return jsonify({"error": "User not found"}), 404
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-# 3. UPDATE USER API (Premium banane ya Block karne ke liye)
-@app.route('/admin/users/<user_id>', methods=['PATCH'])
-def update_user_status(user_id):
-    try:
-        data = request.get_json()
-        
-        # Jo update karna hai uska object banayein (e.g. is_premium, is_blocked)
-        update_fields = {}
-        if 'is_premium' in data:
-            update_fields['is_premium'] = data['is_premium']
-        if 'is_blocked' in data:
-            update_fields['is_blocked'] = data['is_blocked']
-            
-        if not update_fields:
-            return jsonify({"error": "No valid fields to update"}), 400
-            
-        result = db.users.update_one(
-            {'_id': ObjectId(user_id)}, 
-            {'$set': update_fields}
-        )
-        
-        if result.modified_count > 0 or result.matched_count > 0:
-            return jsonify({"success": True, "message": "User updated"}), 200
-        else:
-            return jsonify({"error": "User not found"}), 404
-            
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500                                                                   
+# 3. Upload Ad Image (Gallery preview ke liye)
+@api.post("/admin/upload-ad-image")
+async def upload_ad_image(request: Request, image: UploadFile = File(...), admin: dict = Depends(require_admin)):
+    if not image:
+        raise HTTPException(status_code=400, detail="No image file provided")
+    
+    file_path = os.path.join(UPLOAD_DIR, image.filename)
+    
+    # File save karna
+    with open(file_path, "wb") as buffer:
+        buffer.write(await image.read())
+    
+    # URL generate karna (Apne server ka IP/domain name yahan theek karein agar zarurat ho)
+    image_url = f"{request.base_url}uploads/{image.filename}"
+    
+    return {"success": True, "url": image_url}                                                                   
 
 
 SAMPLE_JOBS = [
