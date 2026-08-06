@@ -2360,7 +2360,71 @@ def upload_ad_image():
 
 @app.route('/uploads/<filename>')
 def uploaded_file(filename):
-    return send_from_directory(UPLOAD_FOLDER, filename)                                                               
+    return send_from_directory(UPLOAD_FOLDER, filename)
+
+# 1. GET ALL USERS API (Dashboard mein users dikhane ke liye)
+@app.route('/admin/users', methods=['GET'])
+def get_all_users():
+    try:
+        # Database se saare users fetch karo (latest pehle)
+        users_cursor = db.users.find().sort('_id', -1)
+        users_list = []
+        
+        for user in users_cursor:
+            user['_id'] = str(user['_id']) # MongoDB ke ID ko string banayein
+            
+            # Security: Password waghera frontend par na bhejein
+            if 'password' in user:
+                del user['password']
+                
+            users_list.append(user)
+            
+        return jsonify({"users": users_list}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# 2. DELETE USER API (User ko hamesha ke liye delete karne ke liye)
+@app.route('/admin/users/<user_id>', methods=['DELETE'])
+def delete_user_admin(user_id):
+    try:
+        result = db.users.delete_one({'_id': ObjectId(user_id)})
+        if result.deleted_count > 0:
+            return jsonify({"success": True, "message": "User deleted"}), 200
+        else:
+            return jsonify({"error": "User not found"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# 3. UPDATE USER API (Premium banane ya Block karne ke liye)
+@app.route('/admin/users/<user_id>', methods=['PATCH'])
+def update_user_status(user_id):
+    try:
+        data = request.get_json()
+        
+        # Jo update karna hai uska object banayein (e.g. is_premium, is_blocked)
+        update_fields = {}
+        if 'is_premium' in data:
+            update_fields['is_premium'] = data['is_premium']
+        if 'is_blocked' in data:
+            update_fields['is_blocked'] = data['is_blocked']
+            
+        if not update_fields:
+            return jsonify({"error": "No valid fields to update"}), 400
+            
+        result = db.users.update_one(
+            {'_id': ObjectId(user_id)}, 
+            {'$set': update_fields}
+        )
+        
+        if result.modified_count > 0 or result.matched_count > 0:
+            return jsonify({"success": True, "message": "User updated"}), 200
+        else:
+            return jsonify({"error": "User not found"}), 404
+            
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500                                                                   
 
 
 SAMPLE_JOBS = [
