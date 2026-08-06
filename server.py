@@ -25,7 +25,7 @@ import re
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 from crawl4ai import AsyncWebCrawler
 from urllib.parse import urljoin
-from fastapi import BackgroundTasks, APIRouter, Depends
+from fastapi import BackgroundTasks, APIRouter
 from pymongo.errors import DuplicateKeyError
 from typing import Optional, List
 from bson import ObjectId
@@ -646,8 +646,6 @@ class UpgradePremiumBody(BaseModel):
 # Razorpay client setup karein
 razorpay_client = razorpay.Client(auth=("YOUR_KEY_ID", "YOUR_KEY_SECRET"))
 
-class PaymentVerifyBody(BaseModel):
-    email: str
 
 # =======================
 # Auth Utilities
@@ -2245,6 +2243,9 @@ async def razorpay_webhook(request: Request, x_razorpay_signature: str = Header(
             print("⚠️ Email not found in Razorpay payload")
 
     return {"status": "ok"}
+
+class VerifyPaymentBody(BaseModel):
+    email: str    
 
 @api.post("/verify-payment")
 async def verify_payment(body: VerifyPaymentBody, user: dict = Depends(get_current_user)):
