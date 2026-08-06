@@ -2307,37 +2307,34 @@ async def for_you(user: dict = Depends(get_current_user)):
 UPLOAD_FOLDER = 'uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# 1. Get Ads API (Users aur Admin ke liye home screen par show karne ke liye)
+# 1. Get Ads API (Users aur Admin ke liye)
 @app.route('/ads', methods=['GET'])
 def get_ads():
     try:
-        # Latest saved ads document fetch karo
         ad_doc = db.ads.find_one(sort=[('_id', -1)])
-        if ad_doc:
-            ad_doc['_id'] = str(ad_doc['_id']) # ObjectId ko string me convert karna zaroori hai
+        if ad_doc and 'ads' in ad_doc:
+            ad_doc['_id'] = str(ad_doc['_id'])
             return jsonify(ad_doc), 200
         return jsonify({"ads": []}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
-# 2. Save/Update Ads API (Admin dashboard se 6 slots save karne ke liye)
+# 2. Save/Update Ads API (Admin ke 6 slots save karne ke liye)
 @app.route('/admin/ads', methods=['POST'])
 def save_admin_ads():
     try:
         data = request.get_json()
         ads_data = data.get('ads', [])
         
-        # Purane ads hata kar naye save karlo ya update karo
-        db.ads.delete_many({}) # Sab clear karke latest save kar rahe hain
+        # Database mein purane ads hata kar naye save karo
+        db.ads.delete_many({})
         db.ads.insert_one({"ads": ads_data})
         
         return jsonify({"success": True, "message": "Ads updated successfully!"}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
-# 3. Upload Ad Image API (+ button dabane par image server par save hone ke liye)
+# 3. Upload Ad Image API
 @app.route('/admin/upload-ad-image', methods=['POST'])
 def upload_ad_image():
     try:
@@ -2350,13 +2347,11 @@ def upload_ad_image():
             
         if file:
             filename = secure_filename(file.filename)
-            # Unique filename banane ke liye timestamp ya uuid bhi laga sakte hain
             filepath = os.path.join(UPLOAD_FOLDER, filename)
             file.save(filepath)
             
-            # Image ka public URL generate karo jo app mein dikhega
-            image_url = f"{request.host_url}uploads/{filename}"
-            
+            # Sahi URL format generate karne ke liye
+            image_url = f"{request.host_url.rstrip('/')}/uploads/{filename}"
             return jsonify({"success": True, "url": image_url}), 200
             
     except Exception as e:
