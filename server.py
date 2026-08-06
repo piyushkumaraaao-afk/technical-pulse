@@ -2205,23 +2205,27 @@ async def edit_message(body: EditMessageBody, user: dict = Depends(get_current_u
         
     return {"message": "Message updated successfully"}
 
+from datetime import datetime, timedelta, timezone
+
 @api.post("/api/users/upgrade")
 async def upgrade_to_premium(body: UpgradePremiumBody, user: dict = Depends(get_current_user)):
     my_id = user["user_id"]
     
-    # 🚀 Yahan Razorpay payment verify hoti hai backend level par (Optional but recommended for production)
-    # Abhi ke liye hum seedha database mein is_premium = True kar rahe hain
+    # 🚀 Aaj se 30 din baad ki expiry date set kar rahe hain
+    expiry_date = datetime.now(timezone.utc) + timedelta(days=30)
     
     result = await db.users.update_one(
         {"user_id": my_id},
-        {"$set": {"is_premium": True}}
+        {
+            "$set": {
+                "is_premium": True,
+                "premium_expires_at": expiry_date.isoformat()
+            }
+        }
     )
     
-    if result.modified_count == 0:
-        # Agar already premium hai ya user nahi mila
-        pass
-        
-    return {"message": "Welcome to Premium!", "is_premium": True}
+    return {"message": "Welcome to Premium!", "is_premium": True, "expires_at": expiry_date.isoformat()}
+
 
 @api.post("/api/razorpay-webhook")
 async def razorpay_webhook(request: Request, x_razorpay_signature: str = Header(None)):
@@ -2251,13 +2255,21 @@ async def razorpay_webhook(request: Request, x_razorpay_signature: str = Header(
             # User ka email nikalein (Jo app se link mein attach ho kar aaya tha)
             user_email = data["payload"]["payment"]["entity"]["email"]
             
-            # 6. Database mein is_premium = True kar dein
+            # 🚀 6. 30 din baad ki expiry date calculate karein
+            expiry_date = datetime.now(timezone.utc) + timedelta(days=30)
+
+            # 7. Database mein is_premium = True aur expiry date save kar dein
             if user_email:
                 result = await db.users.update_one(
                     {"email": user_email},
-                    {"$set": {"is_premium": True}}
+                    {
+                        "$set": {
+                            "is_premium": True,
+                            "premium_expires_at": expiry_date.isoformat()
+                        }
+                    }
                 )
-                print(f"✅ Premium unlocked successfully for: {user_email}")
+                print(f"✅ Premium unlocked for 30 days successfully for: {user_email}")
                 
         except KeyError:
             print("⚠️ Email not found in Razorpay payload")
