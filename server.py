@@ -1611,17 +1611,32 @@ async def update_job_status(job_id: str, request: Request, admin: dict = Depends
 # 2. User ko Premium aur Block karne ke liye API
 from bson import ObjectId
 
+from datetime import datetime, timedelta, timezone
+from bson import ObjectId
+
 @api.patch("/admin/users/{user_id}")
 async def update_user_status(user_id: str, request: Request, admin: dict = Depends(require_admin)):
     data = await request.json()
     
     update_data = {}
+    
+    # 🚀 Agar admin ne is_premium ko True kiya hai
     if "is_premium" in data:
-        update_data["is_premium"] = data["is_premium"]
+        is_prem = data["is_premium"]
+        update_data["is_premium"] = is_prem
+        
+        if is_prem:
+            # Agar admin manual Pro bana raha hai, toh aaj se 30 din ki validity set kar do
+            expiry_date = datetime.now(timezone.utc) + timedelta(days=30)
+            update_data["premium_expires_at"] = expiry_date.isoformat()
+        else:
+            # Agar admin ne wapas normal (Free) kar diya, toh expiry hata do
+            update_data["premium_expires_at"] = None
+
     if "is_blocked" in data:
         update_data["is_blocked"] = data["is_blocked"]
         
-    # 💡 Smart Query: Chahe user_id match kare ya MongoDB ki _id, dono ko check karega
+    # Smart Query: Chahe user_id match kare ya MongoDB ki _id, dono ko check karega
     query = {"$or": [{"user_id": user_id}]}
     if ObjectId.is_valid(user_id):
         query["$or"].append({"_id": ObjectId(user_id)})
@@ -1629,9 +1644,9 @@ async def update_user_status(user_id: str, request: Request, admin: dict = Depen
     result = await db.users.update_one(query, {"$set": update_data})
     
     if result.modified_count == 0:
-        return {"success": False, "message": "User not found"}
+        return {"success": False, "message": "User not found or no changes made"}
         
-    return {"success": {"message": "User updated successfully"}}
+    return {"success": True, "message": "User status updated successfully"}
 
 @api.put("/admin/jobs/{job_id}")
 async def admin_update_job(job_id: str, request: Request, admin: dict = Depends(require_admin)):
