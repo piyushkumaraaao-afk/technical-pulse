@@ -966,20 +966,56 @@ async def for_you(user: dict = Depends(get_current_user)):
 
 
 @api.get("/jobs/{job_id}/related")
-async def related_jobs(job_id: str):
+async def related_jobs(job_id: str, user: dict = Depends(get_current_user)):
+    # 1. Current job fetch karein
     job = await db.jobs.find_one({"job_id": job_id}, {"_id": 0})
     if not job:
         raise HTTPException(404, "Job not found")
 
-    related = await db.jobs.find({
+    current_post_type = job.get("post_type", "Job")
+    is_user_premium = user.get("is_premium", False)
+
+    # 2. Base query: Khud ki job nahi aani chahiye aur active honi chahiye
+    query = {
         "job_id": {"$ne": job_id},
         "is_active": True,
-        "$or": [
-            {"category": job.get("category")},
-            {"branches": {"$in": job.get("branches", [])}},
-            {"qualifications": {"$in": job.get("qualifications", [])}}
-        ]
-    }, {"_id": 0}).limit(10).to_list(10)
+        "post_type": current_post_type  # 🚀 Same type match hoga (jaise Admit Card hai toh Admit Card hi)
+    }
+
+    # 🚀 Agar user Premium nahi hai, toh scholarships aur internships ko related se block kar do
+    if not is_user_premium:
+        query["category"] = {"$nin": ["Scholarship", "Internship", "Paid Internship"]}
+
+    # 3. Organization, Branch ya Post Name ka smart matching
+    or_conditions = []
+    
+    if job.get("organization"):
+        or_conditions.append({"organization": job.get("organization")})
+        
+    if job.get("branches"):
+        or_conditions.append({"branches": {"$in": job.get("branches", [])}})
+        
+    if job.get("post_name"):
+        or_conditions.append({"post_name": {"$regex": job.get("post_name"), "$options": "i"}})
+
+    if or_conditions:
+        query["$or"] = or_conditions
+
+    # 4. Fetch related jobs
+    related = await db.jobs.find(query, {"_id": 0}).sort("trending_score", -1).limit(10).to_list(10)
+    
+    # Fallback: Agar exact post_type match ki ek bhi job na mile, toh kam se kam same organization ya category ki bhej do
+    if not related:
+        fallback_query = {
+            "job_id": {"$ne": job_id},
+            "is_active": True,
+            "organization": job.get("organization")
+        }
+        if not is_user_premium:
+            fallback_query["category"] = {"$nin": ["Scholarship", "Internship", "Paid Internship"]}
+            
+        related = await db.jobs.find(fallback_query, {"_id": 0}).limit(10).to_list(10)
+
     return {"jobs": related}
 
 
@@ -1008,28 +1044,50 @@ async def check_eligibility(body: EligibilityCheckBody, user: dict = Depends(get
     reasons = []
     eligible = True
 
-    if user.get("qualification") and job.get("qualifications"):
-        if user["qualification"] not in job["qualifications"]:
+    user_qual = user.get("qualification", "").lower()
+    job_quals = [q.lower() for q in job.get("qualifications", [])]
+    job_category = job.get("category", "").lower()
+    job_title = job.get("post_name", "").lower()
+
+    # 🚀 1. Scholarship ya School-level 10th/12th Exams ke liye Over-qualification Check
+    is_school_level_job = any("10th" in q or "matric" in q or "12th" in q or "intermediate" in q for q in job_quals)
+    is_scholarship = "scholarship" in job_category or "scholarship" in job_title
+
+    # Agar scholarship ya 10th/12th ki post hai, aur user B.Tech, Graduate ya Post-Graduate hai:
+    higher_educations = ["b.tech", "btech", "degree", "graduation", "post graduation", "m.tech", "mba", "bsc", "bcom"]
+    user_is_higher_qualified = any(he in user_qual for he in higher_educations)
+
+    if (is_school_level_job or is_scholarship) and user_is_higher_qualified:
+        # Check karein ki kya job ki requirements mein kahin bhi higher degree allowed hai ya nahi
+        allows_higher = any("graduate" in q or "any degree" in q for q in job_quals)
+        if not allows_higher:
+            eligible = False
+            reasons.append("This scholarship/school-level post is strictly for school students. Higher degree holders (like B.Tech/Graduates) are not eligible.")
+
+    # 2. Baaki purani eligibility logic yahan rahegi...
+    if user.get("qualification") and job_quals and eligible:
+        matched = any(user_qual in jq or jq in user_qual for jq in job_quals)
+        if not matched and not is_school_level_job:
             eligible = False
             reasons.append(f"Requires qualification: {', '.join(job['qualifications'])}")
 
-    if user.get("branch") and job.get("branches"):
-        if user["branch"] not in job["branches"]:
-            eligible = False
-            reasons.append(f"Requires branch: {', '.join(job['branches'])}")
-
+    # Age limit aur branch checks...
     if user.get("age") is not None:
         if job.get("min_age") is not None and user["age"] < job["min_age"]:
             eligible = False
-            reasons.append(f"Minimum age: {job['min_age']}")
+            reasons.append(f"Minimum age required: {job['min_age']}")
         if job.get("max_age") is not None and user["age"] > job["max_age"]:
             eligible = False
-            reasons.append(f"Maximum age: {job['max_age']}")
+            reasons.append(f"Maximum age limit: {job['max_age']}")
 
     if not user.get("qualification") or not user.get("branch"):
-        reasons.append("Complete your profile for accurate check")
+        reasons.append("Complete your profile for an accurate eligibility check.")
 
-    return {"eligible": eligible, "reasons": reasons, "job_id": body.job_id}
+    return {
+        "eligible": eligible,
+        "reasons": reasons,
+        "job_id": body.job_id,
+    }
 
 
 # --- Applications & Tracker ---
