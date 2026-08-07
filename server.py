@@ -1044,34 +1044,57 @@ async def check_eligibility(body: EligibilityCheckBody, user: dict = Depends(get
     reasons = []
     eligible = True
 
-    user_qual = user.get("qualification", "").lower()
-    job_quals = [q.lower() for q in job.get("qualifications", [])]
+    # User details safely extract karein (Chahe string ho ya list)
+    user_qual_raw = user.get("qualification", "")
+    user_quals = [q.strip().lower() for q in user_qual_raw.split(",")] if isinstance(user_qual_raw, str) else [str(user_qual_raw).lower()]
+    
+    user_branch_raw = user.get("branch", "")
+    user_branches = [b.strip().lower() for b in user_branch_raw.split(",")] if isinstance(user_branch_raw, str) else [str(user_branch_raw).lower()]
+
+    job_quals = [q.strip().lower() for q in job.get("qualifications", [])]
+    job_branches = [b.strip().lower() for b in job.get("branches", [])]
     job_category = job.get("category", "").lower()
     job_title = job.get("post_name", "").lower()
 
-    # 🚀 1. Scholarship ya School-level 10th/12th Exams ke liye Over-qualification Check
+    # 1. School level / Scholarship Over-qualification Check
     is_school_level_job = any("10th" in q or "matric" in q or "12th" in q or "intermediate" in q for q in job_quals)
     is_scholarship = "scholarship" in job_category or "scholarship" in job_title
+    
+    user_is_higher = any(any(he in uq for he in ["b.tech", "btech", "degree", "diploma", "m.tech", "bsc"]) for uq in user_quals)
 
-    # Agar scholarship ya 10th/12th ki post hai, aur user B.Tech, Graduate ya Post-Graduate hai:
-    higher_educations = ["b.tech", "btech", "degree", "graduation", "post graduation", "m.tech", "mba", "bsc", "bcom"]
-    user_is_higher_qualified = any(he in user_qual for he in higher_educations)
-
-    if (is_school_level_job or is_scholarship) and user_is_higher_qualified:
-        # Check karein ki kya job ki requirements mein kahin bhi higher degree allowed hai ya nahi
+    if (is_school_level_job or is_scholarship) and user_is_higher:
         allows_higher = any("graduate" in q or "any degree" in q for q in job_quals)
         if not allows_higher:
             eligible = False
-            reasons.append("This scholarship/school-level post is strictly for school students. Higher degree holders (like B.Tech/Graduates) are not eligible.")
+            reasons.append("This school-level post/scholarship is not for technical degree/diploma holders.")
 
-    # 2. Baaki purani eligibility logic yahan rahegi...
-    if user.get("qualification") and job_quals and eligible:
-        matched = any(user_qual in jq or jq in user_qual for jq in job_quals)
-        if not matched and not is_school_level_job:
-            eligible = False
-            reasons.append(f"Requires qualification: {', '.join(job['qualifications'])}")
+    # 2. Qualification Matching (Flexible for Diploma & BTech)
+    if job_quals and eligible:
+        qual_matched = False
+        for uq in user_quals:
+            for jq in job_quals:
+                if uq in jq or jq in uq or ("diploma" in uq and "diploma" in jq) or ("b.tech" in uq and "b.tech" in jq):
+                    qual_matched = True
+                    break
+            if qual_matched:
+                break
+        
+        # Agar job mein 'any' ya 'graduate' hai toh sabhi eligible hain
+        if not qual_matched and not any(q in ["any degree", "graduate", "any"] for q in job_quals):
+            if not is_school_level_job:
+                eligible = False
+                reasons.append(f"Requires qualification: {', '.join(job['qualifications'])}")
 
-    # Age limit aur branch checks...
+    # 3. Branch Matching (Civil user ke liye Civil match karna)
+    if user_branches and job_branches and eligible:
+        branch_matched = any(ub in jb or jb in ub for ub in user_branches for jb in job_branches)
+        if not branch_matched and "all branches" not in job_branches and "civil engineering" not in job_branches:
+            # Agar general post hai toh branch skip ho sakti hai
+            if not any(q in ["any degree", "10th", "12th"] for q in job_quals):
+                eligible = False
+                reasons.append(f"Requires branch: {', '.join(job['branches'])}")
+
+    # 4. Age Limit Check
     if user.get("age") is not None:
         if job.get("min_age") is not None and user["age"] < job["min_age"]:
             eligible = False
@@ -1081,7 +1104,7 @@ async def check_eligibility(body: EligibilityCheckBody, user: dict = Depends(get
             reasons.append(f"Maximum age limit: {job['max_age']}")
 
     if not user.get("qualification") or not user.get("branch"):
-        reasons.append("Complete your profile for an accurate eligibility check.")
+        reasons.append("Complete your profile for an accurate check.")
 
     return {
         "eligible": eligible,
