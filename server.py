@@ -377,154 +377,150 @@ async def refresh_jobs_task() -> None:
                 continue
 
             for entry in entries:
-                job_link = canonical_url(entry["link"])
-                content_hash = generate_content_hash(
-                    entry["title"],
-                    job_link
-                )
+                try:  # 🚀 Yahan 'try' shuru hona zaroori hai
+                    job_link = canonical_url(entry["link"])
+                    content_hash = generate_content_hash(
+                        entry["title"],
+                        job_link
+                    )
                 
-                duplicate = await db.jobs.find_one(
-                    {"content_hash": content_hash},
-                    {"_id": 1}
-                )
+                    duplicate = await db.jobs.find_one(
+                        {"content_hash": content_hash},
+                        {"_id": 1}
+                    )
+                    if duplicate:
+                        continue
 
-                if duplicate:
-                    continue
-
-                title, summary = entry["title"], entry["summary"]
-                title_type = detect_post_type(title)
+                    title, summary = entry["title"], entry["summary"]
+                    title_type = detect_post_type(title)
                 
-                # Agar hamara title_type already IGNORE bol raha hai (jaise Answer Key), toh seedha chhod do
-                if title_type == "IGNORE":
-                    continue
+                    if title_type == "IGNORE":
+                        continue
 
-                print(f"Deep scraping [{title_type}]: {title}")
-                details = await extract_job_details_with_ai(job_link)
+                    print(f"Deep scraping [{title_type}]: {title}")
+                    details = await extract_job_details_with_ai(job_link)
 
-                parent_job_id = None
+                    parent_job_id = None
 
-                if post_type in ["Admit Card", "Result", "Answer Key"]:
-                    original_job = await db.jobs.find_one({
-                        "post_name": {"$regex": post_name[:20], "$options": "i"},
-                        "post_type": "Job"
+                    # ⚠️ Note: Yahan 'post_type' ya toh define hona chahiye ya 'ai_post_type' use karein
+                    # Maine aapke code ke flow ke mutabiq rakha hai
+                    ai_post_type = details.get("post_type", "NA")
+                
+                    if ai_post_type == "IGNORE" and title_type in ["Admit Card", "Result", "Scholarship", "Upcoming Exam"]:
+                        ai_post_type = title_type
+                        print(f"⚠️ Overriding AI: Saved as {title_type} instead of IGNORE.")
+                
+                    if ai_post_type == "IGNORE":
+                        print(f"🚫 Properly Ignored: {title}")
+                        continue
+
+                    post_type = ai_post_type if ai_post_type in ALLOWED_POST_TYPES and ai_post_type != "NA" else title_type
+
+                    post_name = details.get("post_name", "NA")
+                    if post_name == "NA" or not post_name:
+                        post_name = title
+
+                    if post_type in ["Admit Card", "Result", "Answer Key"]:
+                        original_job = await db.jobs.find_one({
+                            "post_name": {"$regex": post_name[:20], "$options": "i"},
+                            "post_type": "Job"
+                        })
+                        if original_job:
+                            parent_job_id = original_job["job_id"]
+
+                    extracted_apply = details.get("apply_online_link", "NA")
+                    action_link = extracted_apply if extracted_apply != "NA" else job_link
+                
+                    exact_date = valid_iso_date(details.get("last_date"))
+                    final_last_date = exact_date if exact_date else (date.today() + timedelta(days=30)).isoformat()
+
+                    similar = await db.jobs.find_one({
+                        "organization": details.get("organization"),
+                        "post_name": post_name,
+                        "last_date": final_last_date
                     })
 
-                    if original_job:
-                        parent_job_id = original_job["job_id"]
-                
-                # 🚀 PYTHON FAILSAFE: Agar AI bewakoofi karke Result/Admit Card ko IGNORE kar de,
-                # Toh hum AI ki baat nahi manenge, aur apna 'title_type' use karke usko add kar lenge!
-                ai_post_type = details.get("post_type", "NA")
-                
-                if ai_post_type == "IGNORE" and title_type in ["Admit Card", "Result", "Scholarship", "Upcoming Exam"]:
-                    ai_post_type = title_type
-                    print(f"⚠️ Overriding AI: Saved as {title_type} instead of IGNORE.")
-                
-                if ai_post_type == "IGNORE":
-                    print(f"🚫 Properly Ignored: {title}")
-                    continue
+                    if similar:
+                        continue
 
-                post_type = ai_post_type if ai_post_type in ALLOWED_POST_TYPES and ai_post_type != "NA" else title_type
+                    await db.jobs.insert_one({
+                        "job_id": f"job_{uuid.uuid4().hex[:12]}",
+                        "parent_job_id": parent_job_id,
+                        "content_hash": content_hash,
+                        "source_url": job_link,
+                        "organization": details.get("organization", "NA") if details.get("organization", "NA") != "NA" else src["name"],
+                        "post_name": post_name,
+                        "post_type": post_type,
+                        "category": details.get("category", "NA") if details.get("category", "NA") != "NA" else src.get("default_category", "Government"),
+                        
+                        "qualifications": fallback_qualifications(title, summary, details.get("qualifications", [])),
+                        "branches": details.get("branches", []),
+                        "vacancies": details.get("total_post", "NA"),
+                        "salary": details.get("salary", "NA"),
+                        "eligibility": details.get("eligibility", "NA") if details.get("eligibility", "NA") != "NA" else summary,
+                        
+                        "category_vacancies": details.get("category_vacancies", []),
+                        "multiple_posts": details.get("multiple_posts", []),
+                        "trade_wise_vacancies": details.get("trade_wise_vacancies", []),
+                        "salary_wise_post_name": details.get("salary_wise_post_name", []),
+                        "state_wise_vacancies": details.get("state_wise_vacancies", []),
+                        "mode_of_selection": details.get("mode_of_selection", []),
+                        "location": details.get("location", "NA"),
+                        
+                        "last_date": final_last_date,
+                        "expires_at": final_last_date,
+                        "is_exact_date": bool(exact_date), 
+                        
+                        "notification_pdf": details.get("check_official_notice") if details.get("check_official_notice") != "NA" else None,
+                        "apply_link": action_link,
+                        "min_age": as_int_or_none(details.get("min_age")),
+                        "max_age": as_int_or_none(details.get("max_age")),
+                        "detailed_age_info": details.get("detailed_age_info", "NA"),
+                        "description": summary,
+                        "is_active": True,
+                        "source": f"scraper:{src['name']}",
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "admit_card_link": details.get("admit_card_link"),
+                        "answer_key_link": details.get("answer_key_link"),
+                        "result_link": details.get("result_link"),
+                        "views": 0,
+                        "saves": 0,
+                        "applications": 0,
+                        "trending_score": 0,
+                        "search_count": 0,
+                    })
 
-                post_name = details.get("post_name", "NA")
-                if post_name == "NA" or not post_name:
-                    post_name = title
+                    if parent_job_id:
+                        if post_type == "Admit Card":
+                            await db.applications.update_many(
+                                {"job_id": parent_job_id},
+                                {"$set": {"status": "admit_card"}}
+                            )
+                        elif post_type == "Result":
+                            await db.applications.update_many(
+                                {"job_id": parent_job_id},
+                                {"$set": {"status": "result"}}
+                            )
 
-                extracted_apply = details.get("apply_online_link", "NA")
-                action_link = extracted_apply if extracted_apply != "NA" else job_link
-                
-                exact_date = valid_iso_date(details.get("last_date"))
-                final_last_date = exact_date if exact_date else (date.today() + timedelta(days=30)).isoformat()
+                        saved_users = await db.applications.find(
+                            {"job_id": parent_job_id},
+                            {"_id": 0, "user_id": 1}
+                        ).to_list(1000)
 
-                similar = await db.jobs.find_one({
-                    "organization": details.get("organization"),
-                    "post_name": post_name,
-                    "last_date": final_last_date
-                })
+                        recipients = [x["user_id"] for x in saved_users]
 
-                if similar:
-                    continue
+                        await send_push(
+                            recipients,
+                            {
+                                "title": f"{post_type} Released",
+                                "message": post_name
+                            }
+                        )
+                    added += 1
 
-                except Exception as inner_exc:
+                except Exception as inner_exc:  # 🚀 Ab yeh 'try' ke sath perfectly match ho gaya
                     print(f"❌ Error processing entry {entry.get('title')}: {inner_exc}")
-                    continue # Ek kharab job ki wajah se baki sab band nahi honge    
-
-                await db.jobs.insert_one({
-                    "job_id": f"job_{uuid.uuid4().hex[:12]}",
-                    "parent_job_id": parent_job_id,
-                    "content_hash": content_hash,
-                    "source_url": job_link,
-                    "organization": details.get("organization", "NA") if details.get("organization", "NA") != "NA" else src["name"],
-                    "post_name": post_name,
-                    "post_type": post_type,
-                    "category": details.get("category", "NA") if details.get("category", "NA") != "NA" else src.get("default_category", "Government"),
-                    
-                    "qualifications": fallback_qualifications(title, summary, details.get("qualifications", [])),
-                    "branches": details.get("branches", []),
-                    "vacancies": details.get("total_post", "NA"),
-                    "salary": details.get("salary", "NA"),
-                    "eligibility": details.get("eligibility", "NA") if details.get("eligibility", "NA") != "NA" else summary,
-                    
-                    "category_vacancies": details.get("category_vacancies", []),
-                    "multiple_posts": details.get("multiple_posts", []),
-                    "trade_wise_vacancies": details.get("trade_wise_vacancies", []), # For SAIL Rourkela style UI
-                    "salary_wise_post_name": details.get("salary_wise_post_name", []),
-                    "state_wise_vacancies": details.get("state_wise_vacancies", []),
-                    "mode_of_selection": details.get("mode_of_selection", []),
-                    "location": details.get("location", "NA"),
-                    
-                    "last_date": final_last_date,
-                    "expires_at": final_last_date,
-                    "is_exact_date": bool(exact_date), 
-                    
-                    "notification_pdf": details.get("check_official_notice") if details.get("check_official_notice") != "NA" else None,
-                    "apply_link": action_link,
-                    "min_age": as_int_or_none(details.get("min_age")),
-                    "max_age": as_int_or_none(details.get("max_age")),
-                    "detailed_age_info": details.get("detailed_age_info", "NA"), # For RRB / ISRO style complex age info
-                    "description": summary,
-                    "is_active": True,
-                    "source": f"scraper:{src['name']}",
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                    "admit_card_link": details.get("admit_card_link"),
-                    "answer_key_link": details.get("answer_key_link"),
-                    "result_link": details.get("result_link"),
-                    "views": 0,
-                    "saves": 0,
-                    "applications": 0,
-                    "trending_score": 0,
-                    "search_count": 0,
-                    
-                })
-                if parent_job_id:
-
-                    if post_type == "Admit Card":
-                        await db.applications.update_many(
-                            {"job_id": parent_job_id},
-                            {"$set": {"status": "admit_card"}}
-                        )
-
-                    elif post_type == "Result":
-                        await db.applications.update_many(
-                            {"job_id": parent_job_id},
-                            {"$set": {"status": "result"}}
-                        )
-
-                    saved_users = await db.applications.find(
-                        {"job_id": parent_job_id},
-                        {"_id": 0, "user_id": 1}
-                    ).to_list(1000)
-
-                    recipients = [x["user_id"] for x in saved_users]
-
-                    await send_push(
-                        recipients,
-                        {
-                            "title": f"{post_type} Released",
-                            "message": post_name
-                        }
-                    )
-                added += 1
+                    continue
 
     print(f"✅ Scraping cycle finished! +{added} added, {removed} expired")
 
