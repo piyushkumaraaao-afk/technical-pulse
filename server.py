@@ -1210,70 +1210,59 @@ async def delete_resume(resume_id: str, user: dict = Depends(get_current_user)):
 @api.post("/ai/chat")
 async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
     session_id = body.session_id or f"chat_{user['user_id']}"
-    
-    # 🚀 1. SMART DATABASE QUERYING
-    query_filters = {"is_active": True}
     msg_lower = body.message.lower()
     
-    # 🔹 Branch & ITI Trade Matcher (Ab Fitter, Electrician sab cover honge)
-    if "fitter" in msg_lower:
-        query_filters["$or"] = [
-            {"branches": {"$regex": "Fitter", "$options": "i"}},
-            {"post_name": {"$regex": "Fitter", "$options": "i"}}
-        ]
-    elif "electrician" in msg_lower or "wireman" in msg_lower:
-        query_filters["$or"] = [
-            {"branches": {"$regex": "Electrician", "$options": "i"}},
-            {"post_name": {"$regex": "Electrician", "$options": "i"}}
-        ]
-    elif "welder" in msg_lower:
-        query_filters["$or"] = [
-            {"branches": {"$regex": "Welder", "$options": "i"}},
-            {"post_name": {"$regex": "Welder", "$options": "i"}}
-        ]
-    elif "civil" in msg_lower:
-        query_filters["branches"] = {"$regex": "Civil", "$options": "i"}
-    elif "mechanical" in msg_lower or "mech" in msg_lower:
-        query_filters["branches"] = {"$regex": "Mechanical", "$options": "i"}
-    elif "electrical" in msg_lower:
-        query_filters["branches"] = {"$regex": "Electrical", "$options": "i"}
-    elif "computer" in msg_lower or "cse" in msg_lower or "it" in msg_lower:
-        query_filters["branches"] = {"$regex": "Computer", "$options": "i"}
-        
-    # 🔹 Qualification Matcher (10th, 12th, ITI, Diploma, BTech, Graduate)
-    if "fitter" in msg_lower or "iti" in msg_lower or "welder" in msg_lower or "electrician" in msg_lower:
-        # Fitter/Trades ke liye ITI auto-detect ho jaye agar explicitly alag na mention ho
-        if "diploma" not in msg_lower:
-            query_filters["qualifications"] = {"$regex": "ITI", "$options": "i"}
-    elif "diploma" in msg_lower:
-        query_filters["qualifications"] = {"$regex": "Diploma", "$options": "i"}
-    elif "btech" in msg_lower or "degree" in msg_lower or "b.tech" in msg_lower or "be" in msg_lower:
-        query_filters["qualifications"] = {"$regex": "BTech", "$options": "i"}
-    elif "12th" in msg_lower or "intermediate" in msg_lower or "twelfth" in msg_lower:
-        query_filters["qualifications"] = {"$regex": "12th", "$options": "i"}
-    elif "10th" in msg_lower or "matric" in msg_lower or "tenth" in msg_lower:
-        query_filters["qualifications"] = {"$regex": "10th", "$options": "i"}
-    elif "graduate" in msg_lower or "graduation" in msg_lower or "b.sc" in msg_lower or "bsc" in msg_lower:
-        query_filters["qualifications"] = {"$regex": "Graduate", "$options": "i"}
-        
-    # Database se Top 3 Active Jobs fetch karein
-    matching_jobs = await db.jobs.find(query_filters, {"_id": 0}).sort("trending_score", -1).limit(3).to_list(3)
-    
-    # 🚀 2. AI CONTEXT BUILDER
-    if matching_jobs:
-        jobs_context = "\n".join([
-            f"- {j.get('post_name')} at {j.get('organization')} (Salary: {j.get('salary', 'NA')})" 
-            for j in matching_jobs
-        ])
-        sys_prompt = "You are CareerPulse Assistant. Recommend the specific jobs provided in the context below. Be encouraging and keep answers under 150 words."
-    else:
-        jobs_context = "No direct matching jobs found in the database right now."
-        sys_prompt = "You are CareerPulse Assistant, a helpful career advisor for students in India. Keep answers under 150 words."
+    # 🚀 1. INTENT DETECTION: Kya user sach mein job maang raha hai?
+    job_keywords = ["job", "vacancy", "recruitment", "apprentice", "internship", "fresher", "post", "apply", "opportunity", "hire", "sarkari"]
+    branch_map = {"civil": "Civil", "mechanical": "Mechanical", "mech": "Mechanical", "electrical": "Electrical", "computer": "Computer", "cse": "Computer", "it": "Computer", "fitter": "Fitter", "electrician": "Electrician", "wireman": "Electrician", "welder": "Welder"}
+    qual_map = {"diploma": "Diploma", "btech": "BTech", "b.tech": "BTech", "degree": "BTech", "be": "BTech", "12th": "12th", "intermediate": "12th", "twelfth": "12th", "10th": "10th", "matric": "10th", "tenth": "10th", "iti": "ITI", "graduate": "Graduate", "graduation": "Graduate", "b.sc": "Graduate", "bsc": "Graduate"}
 
-    profile_ctx = (
-        f"Student profile: {user.get('name')}, Qualification: {user.get('qualification')}, Branch: {user.get('branch')}."
-    )
+    # Check agar user ne chat me specifically koi branch ya qualification mangi hai
+    requested_branch = next((v for k, v in branch_map.items() if k in msg_lower), None)
+    requested_qual = next((v for k, v in qual_map.items() if k in msg_lower), None)
+
+    # Agar inme se koi word mila, toh matlab jobs fetch karni hain
+    wants_jobs = any(k in msg_lower for k in job_keywords) or bool(requested_branch) or bool(requested_qual)
+
+    matching_jobs = []
+
+    # 🚀 2. SMART DATABASE QUERYING (Sirf tab chalega jab jobs ki baat ho)
+    if wants_jobs:
+        query_filters = {"is_active": True}
+
+        # A. Branch Filter: Agar user ne type kiya hai toh wo lo, warna profile branch lo
+        target_branch = requested_branch or user.get("branch")
+        if target_branch:
+            query_filters["$or"] = [
+                {"branches": {"$regex": target_branch, "$options": "i"}},
+                {"post_name": {"$regex": target_branch, "$options": "i"}}
+            ]
+
+        # B. Qualification Filter: Agar user ne type kiya hai toh wo lo, warna profile qual lo
+        target_qual = requested_qual or user.get("qualification")
+        if target_qual:
+            query_filters["qualifications"] = {"$regex": target_qual, "$options": "i"}
+
+        matching_jobs = await db.jobs.find(query_filters, {"_id": 0}).sort("trending_score", -1).limit(3).to_list(3)
+
+    # 🚀 3. AI CONTEXT BUILDER (Greetings vs Job Mode)
+    profile_ctx = f"Student profile: {user.get('name')}, Qualification: {user.get('qualification')}, Branch: {user.get('branch')}."
     
+    if wants_jobs:
+        if matching_jobs:
+            jobs_context = "\n".join([
+                f"- {j.get('post_name')} at {j.get('organization')} (Salary: {j.get('salary', 'NA')})" 
+                for j in matching_jobs
+            ])
+            sys_prompt = "You are CareerPulse Assistant. The user is looking for jobs/career advice. Recommend ONLY the specific jobs provided in the context below. Be encouraging and keep answers under 150 words."
+        else:
+            jobs_context = "No direct matching jobs found in the database right now."
+            sys_prompt = "You are CareerPulse Assistant. The user wants jobs based on their query, but there are no matching active jobs in the database currently. Inform them politely. Keep answers under 100 words."
+    else:
+        # 🟢 GREETING MODE (Agar user ne sirf Hii, Hello, ya mera naam kya hai pucha)
+        jobs_context = ""
+        sys_prompt = "You are CareerPulse Assistant, a helpful career advisor for students in India. Chat naturally, answer general questions, or greet the user politely. Do NOT recommend any jobs unless explicitly asked. Keep answers under 100 words."
+
     try:    
         headers = {
             "Authorization": f"Bearer {GROQ_CHAT_API_KEY}",
@@ -1291,7 +1280,6 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
         async with httpx.AsyncClient(timeout=20.0) as client:
             resp = await client.post(GROQ_URL, headers=headers, json=payload)
             if resp.status_code != 200:
-                print(f"❌ Groq API Failed! Status: {resp.status_code}, Response: {resp.text}")
                 raise Exception(f"Groq API Error: {resp.text}")
                 
             data = resp.json()
@@ -1301,7 +1289,7 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
         logger.exception("AI chat failed")
         raise HTTPException(status_code=502, detail=f"AI service error: {str(e)}")
 
-    # History entry save
+    # 🚀 4. SAVE TO HISTORY
     await db.chat_messages.insert_one({
         "user_id": user["user_id"],
         "session_id": session_id,
