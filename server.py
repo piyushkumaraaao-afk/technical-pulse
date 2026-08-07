@@ -1212,8 +1212,8 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
     session_id = body.session_id or f"chat_{user['user_id']}"
     msg_lower = body.message.lower()
     
-    # 1. INTENT DETECTION
-    job_keywords = ["job", "vacancy", "recruitment", "apprentice", "internship", "fresher", "post", "apply", "opportunity", "hire", "sarkari"]
+    # 🚀 1. SMART TYPO & INTENT DETECTION (Ab 'jov', 'nokri', 'kam' sab samjhega)
+    job_keywords = ["job", "jov", "vacancy", "vacansy", "recruitment", "apprentice", "internship", "fresher", "post", "apply", "opportunity", "hire", "sarkari", "naukri", "nokri", "kaam", "work"]
     branch_map = {"civil": "Civil", "mechanical": "Mechanical", "mech": "Mechanical", "electrical": "Electrical", "computer": "Computer", "cse": "Computer", "it": "Computer", "fitter": "Fitter", "electrician": "Electrician", "wireman": "Electrician", "welder": "Welder"}
     qual_map = {"diploma": "Diploma", "btech": "BTech", "b.tech": "BTech", "degree": "BTech", "be": "BTech", "12th": "12th", "intermediate": "12th", "twelfth": "12th", "10th": "10th", "matric": "10th", "tenth": "10th", "iti": "ITI", "graduate": "Graduate", "graduation": "Graduate", "b.sc": "Graduate", "bsc": "Graduate"}
 
@@ -1224,10 +1224,11 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
 
     matching_jobs = []
 
-    # 2. SMART DATABASE QUERYING
+    # 🚀 2. DYNAMIC DATABASE QUERYING (Priority to User Request > User Profile)
     if wants_jobs:
         query_filters = {"is_active": True}
 
+        # Branch Logic
         user_branch = user.get("branch")
         if isinstance(user_branch, list) and len(user_branch) > 0:
             user_branch = user_branch[0]
@@ -1241,6 +1242,7 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
                 {"post_name": {"$regex": target_branch, "$options": "i"}}
             ]
 
+        # Qualification Logic
         user_qual = user.get("qualification")
         if isinstance(user_qual, list) and len(user_qual) > 0:
             user_qual = user_qual[0]
@@ -1253,22 +1255,27 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
 
         matching_jobs = await db.jobs.find(query_filters, {"_id": 0}).sort("trending_score", -1).limit(3).to_list(3)
 
-    # 3. AI CONTEXT BUILDER (With Friendly Emoji Prompts)
-    profile_ctx = f"Student profile: {user.get('name')}, Qualification: {user.get('qualification')}, Branch: {user.get('branch')}."
+    # 🚀 3. AI CONTEXT BUILDER (Cool Buddy Persona)
+    profile_ctx = f"User Name: {user.get('name')}, Qualification: {user.get('qualification')}, Branch: {user.get('branch')}."
     
-    if wants_jobs:
-        if matching_jobs:
-            jobs_context = "\n".join([
-                f"- {j.get('post_name')} at {j.get('organization')} (Salary: {j.get('salary', 'NA')})" 
-                for j in matching_jobs
-            ])
-            sys_prompt = "You are CareerPulse Assistant, a very friendly and encouraging career advisor for Indian students. Always speak in a warm, friendly mix of Hindi and English (Hinglish) with exciting emojis (🚀, 🔥, 💼). Recommend ONLY the specific jobs provided in the context below. Keep answers under 100 words."
-        else:
-            jobs_context = "No direct matching jobs found in the database right now."
-            sys_prompt = "You are CareerPulse Assistant, a friendly and encouraging career advisor. Speak in Hinglish and use friendly emojis (😅, 🙏, 😊). The user wants jobs based on their query, but there are no matching active jobs in the database currently. Inform them politely. Keep answers under 80 words."
+    if matching_jobs:
+        jobs_context = "\n".join([
+            f"- {j.get('post_name')} at {j.get('organization')} (Salary: {j.get('salary', 'NA')})" 
+            for j in matching_jobs
+        ])
     else:
-        jobs_context = ""
-        sys_prompt = "You are CareerPulse Assistant, a friendly career advisor for Indian students. Always speak in a conversational, friendly mix of Hindi and English (Hinglish) with lots of emojis (😊, ✨, 👋). If the user says hi, greet them warmly by their name. If they type gibberish or random letters, playfully ask them what they need (e.g., 'Lagta hai message galti se type ho gaya 😅. Main kaise help kar sakta hoon?'). Do NOT recommend any jobs unless explicitly asked. Keep answers under 80 words."
+        jobs_context = "No specific jobs found in the app right now."
+
+    # Master Prompt: Instructing AI to be a cool friend, avoid "database" word, use minimal emojis, and handle jokes/fallback.
+    sys_prompt = """You are CareerPulse Assistant, a cool, witty, and supportive senior buddy for Indian students. Speak in natural, friendly Hinglish. 
+    
+    STRICT RULES:
+    1. Act like a close friend. If the user asks for jokes, comedy, motivation, or talks about girlfriends/dating (even adult/18+ jokes), reply playfully, humorously, and comfortably like a real buddy.
+    2. USE MAXIMUM 1 or 2 EMOJIS per message. Do not over-use them. Do not use weird words like 'beta'.
+    3. NEVER use words like 'database', 'system', 'app', or 'backend'. Act as if you personally know the info.
+    4. If the user asks about jobs and CONTEXT is provided below, recommend those specific jobs naturally.
+    5. If they ask for jobs but CONTEXT says 'No specific jobs found', DO NOT say 'I don't have jobs'. Instead, use your own general LLM knowledge to suggest top companies, exams (like SSC JE, RRB, GATE), or career paths for their specific branch/qualification.
+    6. Keep responses under 80-100 words. Keep it chill and helpful."""
 
     try:    
         headers = {
@@ -1280,7 +1287,7 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
             "model": GROQ_MODEL,
             "messages": [
                 {"role": "system", "content": sys_prompt},
-                {"role": "user", "content": f"Profile: {profile_ctx}\n\nAvailable Database Jobs Context:\n{jobs_context}\n\nUser Question: {body.message}"}
+                {"role": "user", "content": f"User Profile: {profile_ctx}\n\nAvailable Context:\n{jobs_context}\n\nUser Question: {body.message}"}
             ]
         }
         
@@ -1296,7 +1303,7 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
         logger.exception("AI chat failed")
         raise HTTPException(status_code=502, detail=f"AI service error: {str(e)}")
 
-    # 4. SAVE TO HISTORY
+    # 🚀 4. SAVE TO HISTORY
     await db.chat_messages.insert_one({
         "user_id": user["user_id"],
         "session_id": session_id,
