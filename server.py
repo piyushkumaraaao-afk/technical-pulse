@@ -1212,40 +1212,50 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
     session_id = body.session_id or f"chat_{user['user_id']}"
     msg_lower = body.message.lower()
     
-    # 🚀 1. INTENT DETECTION: Kya user sach mein job maang raha hai?
+    # 🚀 1. INTENT DETECTION
     job_keywords = ["job", "vacancy", "recruitment", "apprentice", "internship", "fresher", "post", "apply", "opportunity", "hire", "sarkari"]
     branch_map = {"civil": "Civil", "mechanical": "Mechanical", "mech": "Mechanical", "electrical": "Electrical", "computer": "Computer", "cse": "Computer", "it": "Computer", "fitter": "Fitter", "electrician": "Electrician", "wireman": "Electrician", "welder": "Welder"}
     qual_map = {"diploma": "Diploma", "btech": "BTech", "b.tech": "BTech", "degree": "BTech", "be": "BTech", "12th": "12th", "intermediate": "12th", "twelfth": "12th", "10th": "10th", "matric": "10th", "tenth": "10th", "iti": "ITI", "graduate": "Graduate", "graduation": "Graduate", "b.sc": "Graduate", "bsc": "Graduate"}
 
-    # Check agar user ne chat me specifically koi branch ya qualification mangi hai
     requested_branch = next((v for k, v in branch_map.items() if k in msg_lower), None)
     requested_qual = next((v for k, v in qual_map.items() if k in msg_lower), None)
 
-    # Agar inme se koi word mila, toh matlab jobs fetch karni hain
     wants_jobs = any(k in msg_lower for k in job_keywords) or bool(requested_branch) or bool(requested_qual)
 
     matching_jobs = []
 
-    # 🚀 2. SMART DATABASE QUERYING (Sirf tab chalega jab jobs ki baat ho)
+    # 🚀 2. SMART DATABASE QUERYING (List Crash Fix Applied)
     if wants_jobs:
         query_filters = {"is_active": True}
 
-        # A. Branch Filter: Agar user ne type kiya hai toh wo lo, warna profile branch lo
-        target_branch = requested_branch or user.get("branch")
-        if target_branch:
+        # A. Branch Filter: Safe extraction from List
+        user_branch = user.get("branch")
+        if isinstance(user_branch, list) and len(user_branch) > 0:
+            user_branch = user_branch[0]  # List me se text nikal liya
+        elif isinstance(user_branch, list):
+            user_branch = None
+
+        target_branch = requested_branch or user_branch
+        if target_branch and isinstance(target_branch, str):
             query_filters["$or"] = [
                 {"branches": {"$regex": target_branch, "$options": "i"}},
                 {"post_name": {"$regex": target_branch, "$options": "i"}}
             ]
 
-        # B. Qualification Filter: Agar user ne type kiya hai toh wo lo, warna profile qual lo
-        target_qual = requested_qual or user.get("qualification")
-        if target_qual:
+        # B. Qualification Filter: Safe extraction from List
+        user_qual = user.get("qualification")
+        if isinstance(user_qual, list) and len(user_qual) > 0:
+            user_qual = user_qual[0]  # List me se text nikal liya
+        elif isinstance(user_qual, list):
+            user_qual = None
+
+        target_qual = requested_qual or user_qual
+        if target_qual and isinstance(target_qual, str):
             query_filters["qualifications"] = {"$regex": target_qual, "$options": "i"}
 
         matching_jobs = await db.jobs.find(query_filters, {"_id": 0}).sort("trending_score", -1).limit(3).to_list(3)
 
-    # 🚀 3. AI CONTEXT BUILDER (Greetings vs Job Mode)
+    # 🚀 3. AI CONTEXT BUILDER
     profile_ctx = f"Student profile: {user.get('name')}, Qualification: {user.get('qualification')}, Branch: {user.get('branch')}."
     
     if wants_jobs:
@@ -1259,7 +1269,6 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
             jobs_context = "No direct matching jobs found in the database right now."
             sys_prompt = "You are CareerPulse Assistant. The user wants jobs based on their query, but there are no matching active jobs in the database currently. Inform them politely. Keep answers under 100 words."
     else:
-        # 🟢 GREETING MODE (Agar user ne sirf Hii, Hello, ya mera naam kya hai pucha)
         jobs_context = ""
         sys_prompt = "You are CareerPulse Assistant, a helpful career advisor for students in India. Chat naturally, answer general questions, or greet the user politely. Do NOT recommend any jobs unless explicitly asked. Keep answers under 100 words."
 
@@ -1919,6 +1928,9 @@ class DeleteMessagesBody(BaseModel):
 class FriendBody(BaseModel):
     friend_id: str
 
+class DeleteChatBody(BaseModel):
+    texts: List[str]    
+
 # ==========================================
 # 1. ADD / REMOVE FRIEND ENDPOINTS
 # ==========================================
@@ -2195,7 +2207,22 @@ async def upload_ad_image(request: Request, image: UploadFile = File(...), admin
     # URL generate karna (Apne server ka IP/domain name yahan theek karein agar zarurat ho)
     image_url = f"{request.base_url}uploads/{image.filename}"
     
-    return {"success": True, "url": image_url}                                                                   
+    return {"success": True, "url": image_url}
+
+@api.post("/ai/chat/delete")
+async def delete_ai_chat(body: DeleteChatBody, user: dict = Depends(get_current_user)):
+    if not body.texts:
+        return {"ok": False}
+        
+    # User ya Assistant kisi ka bhi matching text ho, us document ko delete kar do
+    await db.chat_messages.delete_many({
+        "user_id": user["user_id"],
+        "$or": [
+            {"user_message": {"$in": body.texts}},
+            {"assistant_message": {"$in": body.texts}}
+        ]
+    })
+    return {"ok": True}                                                                       
 
 
 SAMPLE_JOBS = [
