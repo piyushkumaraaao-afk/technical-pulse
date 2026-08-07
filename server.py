@@ -1209,79 +1209,94 @@ async def delete_resume(resume_id: str, user: dict = Depends(get_current_user)):
 # --- AI Career Assistant Endpoints ---
 @api.post("/ai/chat")
 async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
+    # 🛡️ 1. ANTI-CRASH SECURITY
+    safe_message = body.message[:500].strip()
+    if not safe_message:
+         return {"reply": "Bhai, kuch type toh kar de! 😅", "session_id": body.session_id, "jobs": []}
+
     session_id = body.session_id or f"chat_{user['user_id']}"
-    msg_lower = body.message.lower()
+    msg_lower = safe_message.lower()
     
-    # 🚀 1. INTENT & TYPO DETECTION
-    job_keywords = ["job", "jov", "vacancy", "vacansy", "recruitment", "apprentice", "internship", "fresher", "post", "apply", "opportunity", "hire", "sarkari", "naukri", "nokri", "kaam", "work", "suggest"]
-    branch_map = {"civil": "Civil", "mechanical": "Mechanical", "mech": "Mechanical", "electrical": "Electrical", "computer": "Computer", "cse": "Computer", "it": "Computer", "fitter": "Fitter", "electrician": "Electrician", "wireman": "Electrician", "welder": "Welder"}
-    qual_map = {"diploma": "Diploma", "btech": "BTech", "b.tech": "BTech", "degree": "BTech", "be": "BTech", "12th": "12th", "intermediate": "12th", "twelfth": "12th", "10th": "10th", "matric": "10th", "tenth": "10th", "iti": "ITI", "graduate": "Graduate", "graduation": "Graduate", "b.sc": "Graduate", "bsc": "Graduate"}
-
-    requested_branch = next((v for k, v in branch_map.items() if k in msg_lower), None)
-    requested_qual = next((v for k, v in qual_map.items() if k in msg_lower), None)
-
-    wants_jobs = any(k in msg_lower for k in job_keywords) or bool(requested_branch) or bool(requested_qual)
+    # 🚀 2. DYNAMIC KEYWORD EXTRACTOR (Universal Search)
+    # Faltu words ko hata kar sirf actual kaam ke words (Post, Category, Location) nikalna
+    stop_words = {"ke", "liye", "koi", "job", "jobs", "jov", "vacancy", "vacansy", "hai", "batao", "suggest", "me", "mujhe", "chahiye", "ki", "ka", "ha", "in", "for", "a", "an", "the", "is", "are", "am", "i", "want", "need", "any", "please", "pls", "dikhao", "do", "karo", "kya", "mai", "main", "aur", "ya"}
+    
+    raw_words = msg_lower.replace("?"," ").replace("."," ").replace(","," ").split()
+    search_keywords = [w for w in raw_words if w not in stop_words and len(w) > 1]
+    
+    # Check karna ki jobs mangi hai ya general baat hai
+    job_intent_words = ["job", "jov", "vacancy", "recruitment", "apprentice", "internship", "fresher", "post", "apply", "opportunity", "hire", "sarkari", "naukri", "nokri", "kaam", "work", "suggest", "engineer", "clerk", "constable", "manager"]
+    wants_jobs = any(k in msg_lower for k in job_intent_words) or len(search_keywords) > 0
 
     matching_jobs = []
 
-    # 🚀 2. DYNAMIC DATABASE QUERYING
+    # 🚀 3. ULTRA-SMART DATABASE QUERYING (Checks ALL 9 Fields)
     if wants_jobs:
         query_filters = {"is_active": True}
 
-        # Branch extraction safely
-        user_branch = user.get("branch")
-        if isinstance(user_branch, list) and len(user_branch) > 0:
-            user_branch = user_branch[0]
-        elif isinstance(user_branch, list):
-            user_branch = None
-
-        target_branch = requested_branch or user_branch
-        if target_branch and isinstance(target_branch, str):
+        if search_keywords:
+            # User ke keywords (jaise "junior", "engineer", "obc") ko regex pattern me convert karna
+            regex_pattern = "|".join(search_keywords)
+            
+            # Ab ye in sabhi fields me dhundega!
             query_filters["$or"] = [
-                {"branches": {"$regex": target_branch, "$options": "i"}},
-                {"post_name": {"$regex": target_branch, "$options": "i"}}
+                {"post_name": {"$regex": regex_pattern, "$options": "i"}},
+                {"branches": {"$regex": regex_pattern, "$options": "i"}},
+                {"qualifications": {"$regex": regex_pattern, "$options": "i"}},
+                {"location": {"$regex": regex_pattern, "$options": "i"}},
+                {"post_type": {"$regex": regex_pattern, "$options": "i"}},
+                {"category": {"$regex": regex_pattern, "$options": "i"}},
+                {"trade": {"$regex": regex_pattern, "$options": "i"}},
+                {"subject": {"$regex": regex_pattern, "$options": "i"}},
+                {"eligibility": {"$regex": regex_pattern, "$options": "i"}}
             ]
+        else:
+            # Agar koi keyword nahi diya (sirf "job batao" bola), toh saved profile use karo
+            user_branch = user.get("branch")
+            if isinstance(user_branch, list) and len(user_branch) > 0:
+                user_branch = user_branch[0]
+            elif isinstance(user_branch, list):
+                user_branch = None
 
-        # Qualification extraction safely
-        user_qual = user.get("qualification")
-        if isinstance(user_qual, list) and len(user_qual) > 0:
-            user_qual = user_qual[0]
-        elif isinstance(user_qual, list):
-            user_qual = None
+            user_qual = user.get("qualification")
+            if isinstance(user_qual, list) and len(user_qual) > 0:
+                user_qual = user_qual[0]
+            elif isinstance(user_qual, list):
+                user_qual = None
 
-        target_qual = requested_qual or user_qual
-        if target_qual and isinstance(target_qual, str):
-            query_filters["qualifications"] = {"$regex": target_qual, "$options": "i"}
+            fallback_or = []
+            if user_branch:
+                fallback_or.append({"branches": {"$regex": user_branch, "$options": "i"}})
+                fallback_or.append({"post_name": {"$regex": user_branch, "$options": "i"}})
+            if user_qual:
+                fallback_or.append({"qualifications": {"$regex": user_qual, "$options": "i"}})
+            
+            if fallback_or:
+                query_filters["$or"] = fallback_or
 
         matching_jobs = await db.jobs.find(query_filters, {"_id": 0}).sort("trending_score", -1).limit(3).to_list(3)
 
-    # 🚀 3. AI CONTEXT BUILDER (Smart Override)
-    # Agar user alag branch maang raha hai, toh AI ko uski purani branch mat batao taaki wo confuse na ho!
-    display_branch = requested_branch if requested_branch else (user.get('branch') or "")
-    display_qual = requested_qual if requested_qual else (user.get('qualification') or "")
-    profile_ctx = f"User Name: {user.get('name')}, Context Focus: {display_qual} {display_branch}."
-    
+    # 🚀 4. AI CONTEXT BUILDER
     if matching_jobs:
         jobs_context = "\n".join([
             f"- {j.get('post_name')} at {j.get('organization')} (Salary: {j.get('salary', 'NA')})" 
             for j in matching_jobs
         ])
-        job_prompt = "I have provided jobs in the context. Recommend them directly and excitedly. Don't mention the word database."
+        job_prompt = "I have provided matching jobs in the context. Recommend them excitedly in 1 line. Tell the user to check the cards below."
     else:
         jobs_context = "No specific jobs found in the app right now."
-        job_prompt = "No exact jobs in context. Suggest top companies or general upcoming exams for their branch."
+        job_prompt = "No exact jobs in context. Tell them kindly that you don't have matching active vacancies right now, but suggest 1 or 2 top companies or exams they can prepare for."
 
-    # 🚀 MASTER SYSTEM PROMPT (Buddy Persona, 2-3 lines, Dating Advice)
+    # 🚀 5. MASTER SYSTEM PROMPT (Strict Rules applied!)
     sys_prompt = f"""You are a cool, supportive college buddy and career advisor for Indian students. Speak in natural Hinglish.
 
     STRICT RULES:
     1. SUPER SHORT: Your reply MUST be ONLY 2 or 3 short lines. Never write long paragraphs.
     2. EMOJIS: Use strictly 1 or 2 emojis per message.
-    3. NO JUDGMENT: If the user asks for a different branch/degree, DO NOT question them. Just give them what they asked for.
-    4. DATING/GIRLFRIEND RULE: If they ask how to make a girlfriend, reply EXACTLY in this vibe: "Bhai, ye bahut easy hai! Ladki se baat karo, bina baat kiye kuch nahi hoga. Pehle friend banao, aur jyada late karoge toh usse koi aur le jayega 😂 Dar ke aage jeet hai!"
-    5. JOKES: If they want jokes (even mature/college ones), be funny like a friend, not a boring robot.
-    6. FORBIDDEN WORDS: NEVER use words like 'database', 'context', 'AI', or 'system'.
-    7. {job_prompt}"""
+    3. DATING/GIRLFRIEND RULE: If they ask how to make a girlfriend, reply EXACTLY this: "Bhai, ye bahut easy hai! Ladki se baat karo, bina baat kiye kuch nahi hoga. Pehle friend banao, aur jada late karoge toh usse koi aur le jayega 😂 Jab tak tum ladki se baat nahi karoge apne dar ke wajah se tab tak kuch nahi hoga!"
+    4. JOKES: If they want jokes, be funny like a true friend, not a boring robot.
+    5. FORBIDDEN WORDS: NEVER use words like 'database', 'context', 'AI', or 'system'. Act naturally.
+    6. {job_prompt}"""
 
     try:    
         headers = {
@@ -1293,7 +1308,7 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
             "model": GROQ_MODEL,
             "messages": [
                 {"role": "system", "content": sys_prompt},
-                {"role": "user", "content": f"User Info: {profile_ctx}\nAvailable Info:\n{jobs_context}\n\nQuestion: {body.message}"}
+                {"role": "user", "content": f"Available Info:\n{jobs_context}\n\nQuestion: {safe_message}"}
             ]
         }
         
@@ -1309,11 +1324,11 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
         logger.exception("AI chat failed")
         raise HTTPException(status_code=502, detail=f"AI service error: {str(e)}")
 
-    # 🚀 4. SAVE TO HISTORY
+    # 🚀 6. SAVE TO HISTORY
     await db.chat_messages.insert_one({
         "user_id": user["user_id"],
         "session_id": session_id,
-        "user_message": body.message,
+        "user_message": safe_message,
         "assistant_message": reply,
         "jobs": [j["job_id"] for j in matching_jobs] if matching_jobs else [],
         "created_at": datetime.now(timezone.utc).isoformat(),
