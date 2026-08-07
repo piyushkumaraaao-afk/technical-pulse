@@ -1209,7 +1209,6 @@ async def delete_resume(resume_id: str, user: dict = Depends(get_current_user)):
 # --- AI Career Assistant Endpoints ---
 @api.post("/ai/chat")
 async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
-    # 🛡️ 1. ANTI-CRASH SECURITY
     safe_message = body.message[:500].strip()
     if not safe_message:
          return {"reply": "Bhai, kuch type toh kar de! 😅", "session_id": body.session_id, "jobs": []}
@@ -1217,86 +1216,70 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
     session_id = body.session_id or f"chat_{user['user_id']}"
     msg_lower = safe_message.lower()
     
-    # 🚀 2. DYNAMIC KEYWORD EXTRACTOR (Universal Search)
-    # Faltu words ko hata kar sirf actual kaam ke words (Post, Category, Location) nikalna
     stop_words = {"ke", "liye", "koi", "job", "jobs", "jov", "vacancy", "vacansy", "hai", "batao", "suggest", "me", "mujhe", "chahiye", "ki", "ka", "ha", "in", "for", "a", "an", "the", "is", "are", "am", "i", "want", "need", "any", "please", "pls", "dikhao", "do", "karo", "kya", "mai", "main", "aur", "ya"}
     
     raw_words = msg_lower.replace("?"," ").replace("."," ").replace(","," ").split()
     search_keywords = [w for w in raw_words if w not in stop_words and len(w) > 1]
     
-    # Check karna ki jobs mangi hai ya general baat hai
-    job_intent_words = ["job", "jov", "vacancy", "recruitment", "apprentice", "internship", "fresher", "post", "apply", "opportunity", "hire", "sarkari", "naukri", "nokri", "kaam", "work", "suggest", "engineer", "clerk", "constable", "manager"]
+    job_intent_words = ["job", "jov", "vacancy", "recruitment", "apprentice", "internship", "fresher", "post", "apply", "opportunity", "hire", "sarkari", "naukri", "nokri", "kaam", "work", "suggest", "engineer", "clerk", "constable", "manager", "admit", "card"]
     wants_jobs = any(k in msg_lower for k in job_intent_words) or len(search_keywords) > 0
 
     matching_jobs = []
 
-    # 🚀 3. ULTRA-SMART DATABASE QUERYING (Checks ALL 9 Fields)
     if wants_jobs:
         query_filters = {"is_active": True}
 
         if search_keywords:
-            # User ke keywords (jaise "junior", "engineer", "obc") ko regex pattern me convert karna
-            regex_pattern = "|".join(search_keywords)
-            
-            # Ab ye in sabhi fields me dhundega!
-            query_filters["$or"] = [
-                {"post_name": {"$regex": regex_pattern, "$options": "i"}},
-                {"branches": {"$regex": regex_pattern, "$options": "i"}},
-                {"qualifications": {"$regex": regex_pattern, "$options": "i"}},
-                {"location": {"$regex": regex_pattern, "$options": "i"}},
-                {"post_type": {"$regex": regex_pattern, "$options": "i"}},
-                {"category": {"$regex": regex_pattern, "$options": "i"}},
-                {"trade": {"$regex": regex_pattern, "$options": "i"}},
-                {"subject": {"$regex": regex_pattern, "$options": "i"}},
-                {"eligibility": {"$regex": regex_pattern, "$options": "i"}}
-            ]
-        else:
-            # Agar koi keyword nahi diya (sirf "job batao" bola), toh saved profile use karo
-            user_branch = user.get("branch")
-            if isinstance(user_branch, list) and len(user_branch) > 0:
-                user_branch = user_branch[0]
-            elif isinstance(user_branch, list):
-                user_branch = None
+            # 🚀 STRICT MATCH: Har keyword ke liye alag se check taaki kachra/random entries na aayein
+            and_conditions = []
+            for kw in search_keywords:
+                and_conditions.append({
+                    "$or": [
+                        {"post_name": {"$regex": kw, "$options": "i"}},
+                        {"branches": {"$regex": kw, "$options": "i"}},
+                        {"qualifications": {"$regex": kw, "$options": "i"}},
+                        {"location": {"$regex": kw, "$options": "i"}},
+                        {"post_type": {"$regex": kw, "$options": "i"}},
+                        {"category": {"$regex": kw, "$options": "i"}},
+                        {"trade": {"$regex": kw, "$options": "i"}},
+                        {"subject": {"$regex": kw, "$options": "i"}},
+                        {"eligibility": {"$regex": kw, "$options": "i"}}
+                    ]
+                })
+            query_filters["$and"] = and_conditions
 
-            user_qual = user.get("qualification")
-            if isinstance(user_qual, list) and len(user_qual) > 0:
-                user_qual = user_qual[0]
-            elif isinstance(user_qual, list):
-                user_qual = None
-
-            fallback_or = []
-            if user_branch:
-                fallback_or.append({"branches": {"$regex": user_branch, "$options": "i"}})
-                fallback_or.append({"post_name": {"$regex": user_branch, "$options": "i"}})
-            if user_qual:
-                fallback_or.append({"qualifications": {"$regex": user_qual, "$options": "i"}})
-            
-            if fallback_or:
-                query_filters["$or"] = fallback_or
-
+        # Pehle strict match try karenge
         matching_jobs = await db.jobs.find(query_filters, {"_id": 0}).sort("trending_score", -1).limit(3).to_list(3)
 
-    # 🚀 4. AI CONTEXT BUILDER
+        # 🚀 SMART FALLBACK: Agar strict match par ek bhi job nahi mili, tab loose search karenge
+        if not matching_jobs and search_keywords:
+            regex_pattern = "|".join(search_keywords)
+            loose_filter = {
+                "is_active": True,
+                "$or": [
+                    {"post_name": {"$regex": regex_pattern, "$options": "i"}},
+                    {"post_type": {"$regex": regex_pattern, "$options": "i"}}
+                ]
+            }
+            matching_jobs = await db.jobs.find(loose_filter, {"_id": 0}).sort("trending_score", -1).limit(3).to_list(3)
+
     if matching_jobs:
         jobs_context = "\n".join([
-            f"- {j.get('post_name')} at {j.get('organization')} (Salary: {j.get('salary', 'NA')})" 
+            f"- {j.get('post_name')} ({j.get('post_type', 'Job')}) at {j.get('organization')} (Salary: {j.get('salary', 'NA')})" 
             for j in matching_jobs
         ])
-        job_prompt = "I have provided matching jobs in the context. Recommend them excitedly in 1 line. Tell the user to check the cards below."
+        job_prompt = "Exact matching jobs are attached below. Mention them shortly in 1 line."
     else:
-        jobs_context = "No specific jobs found in the app right now."
-        job_prompt = "No exact jobs in context. Tell them kindly that you don't have matching active vacancies right now, but suggest 1 or 2 top companies or exams they can prepare for."
+        jobs_context = "No specific jobs found."
+        job_prompt = "No exact jobs found. Give a friendly 2-line advice or alternative exam options."
 
-    # 🚀 5. MASTER SYSTEM PROMPT (Strict Rules applied!)
     sys_prompt = f"""You are a cool, supportive college buddy and career advisor for Indian students. Speak in natural Hinglish.
 
     STRICT RULES:
-    1. SUPER SHORT: Your reply MUST be ONLY 2 or 3 short lines. Never write long paragraphs.
+    1. SUPER SHORT: Your reply MUST be ONLY 2 or 3 short lines max. No long boring text.
     2. EMOJIS: Use strictly 1 or 2 emojis per message.
-    3. DATING/GIRLFRIEND RULE: If they ask how to make a girlfriend, reply EXACTLY this: "Bhai, ye bahut easy hai! Ladki se baat karo, bina baat kiye kuch nahi hoga. Pehle friend banao, aur jada late karoge toh usse koi aur le jayega 😂 Jab tak tum ladki se baat nahi karoge apne dar ke wajah se tab tak kuch nahi hoga!"
-    4. JOKES: If they want jokes, be funny like a true friend, not a boring robot.
-    5. FORBIDDEN WORDS: NEVER use words like 'database', 'context', 'AI', or 'system'. Act naturally.
-    6. {job_prompt}"""
+    3. FORBIDDEN WORDS: NEVER use 'database', 'context', 'AI', or 'system'.
+    4. {job_prompt}"""
 
     try:    
         headers = {
@@ -1324,7 +1307,6 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
         logger.exception("AI chat failed")
         raise HTTPException(status_code=502, detail=f"AI service error: {str(e)}")
 
-    # 🚀 6. SAVE TO HISTORY
     await db.chat_messages.insert_one({
         "user_id": user["user_id"],
         "session_id": session_id,
