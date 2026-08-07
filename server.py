@@ -1210,6 +1210,66 @@ async def delete_resume(resume_id: str, user: dict = Depends(get_current_user)):
 @api.post("/ai/chat")
 async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
     session_id = body.session_id or f"chat_{user['user_id']}"
+    
+    # 🚀 1. SMART DATABASE QUERYING
+    query_filters = {"is_active": True}
+    msg_lower = body.message.lower()
+    
+    # 🔹 Branch & ITI Trade Matcher (Ab Fitter, Electrician sab cover honge)
+    if "fitter" in msg_lower:
+        query_filters["$or"] = [
+            {"branches": {"$regex": "Fitter", "$options": "i"}},
+            {"post_name": {"$regex": "Fitter", "$options": "i"}}
+        ]
+    elif "electrician" in msg_lower or "wireman" in msg_lower:
+        query_filters["$or"] = [
+            {"branches": {"$regex": "Electrician", "$options": "i"}},
+            {"post_name": {"$regex": "Electrician", "$options": "i"}}
+        ]
+    elif "welder" in msg_lower:
+        query_filters["$or"] = [
+            {"branches": {"$regex": "Welder", "$options": "i"}},
+            {"post_name": {"$regex": "Welder", "$options": "i"}}
+        ]
+    elif "civil" in msg_lower:
+        query_filters["branches"] = {"$regex": "Civil", "$options": "i"}
+    elif "mechanical" in msg_lower or "mech" in msg_lower:
+        query_filters["branches"] = {"$regex": "Mechanical", "$options": "i"}
+    elif "electrical" in msg_lower:
+        query_filters["branches"] = {"$regex": "Electrical", "$options": "i"}
+    elif "computer" in msg_lower or "cse" in msg_lower or "it" in msg_lower:
+        query_filters["branches"] = {"$regex": "Computer", "$options": "i"}
+        
+    # 🔹 Qualification Matcher (10th, 12th, ITI, Diploma, BTech, Graduate)
+    if "fitter" in msg_lower or "iti" in msg_lower or "welder" in msg_lower or "electrician" in msg_lower:
+        # Fitter/Trades ke liye ITI auto-detect ho jaye agar explicitly alag na mention ho
+        if "diploma" not in msg_lower:
+            query_filters["qualifications"] = {"$regex": "ITI", "$options": "i"}
+    elif "diploma" in msg_lower:
+        query_filters["qualifications"] = {"$regex": "Diploma", "$options": "i"}
+    elif "btech" in msg_lower or "degree" in msg_lower or "b.tech" in msg_lower or "be" in msg_lower:
+        query_filters["qualifications"] = {"$regex": "BTech", "$options": "i"}
+    elif "12th" in msg_lower or "intermediate" in msg_lower or "twelfth" in msg_lower:
+        query_filters["qualifications"] = {"$regex": "12th", "$options": "i"}
+    elif "10th" in msg_lower or "matric" in msg_lower or "tenth" in msg_lower:
+        query_filters["qualifications"] = {"$regex": "10th", "$options": "i"}
+    elif "graduate" in msg_lower or "graduation" in msg_lower or "b.sc" in msg_lower or "bsc" in msg_lower:
+        query_filters["qualifications"] = {"$regex": "Graduate", "$options": "i"}
+        
+    # Database se Top 3 Active Jobs fetch karein
+    matching_jobs = await db.jobs.find(query_filters, {"_id": 0}).sort("trending_score", -1).limit(3).to_list(3)
+    
+    # 🚀 2. AI CONTEXT BUILDER
+    if matching_jobs:
+        jobs_context = "\n".join([
+            f"- {j.get('post_name')} at {j.get('organization')} (Salary: {j.get('salary', 'NA')})" 
+            for j in matching_jobs
+        ])
+        sys_prompt = "You are CareerPulse Assistant. Recommend the specific jobs provided in the context below. Be encouraging and keep answers under 150 words."
+    else:
+        jobs_context = "No direct matching jobs found in the database right now."
+        sys_prompt = "You are CareerPulse Assistant, a helpful career advisor for students in India. Keep answers under 150 words."
+
     profile_ctx = (
         f"Student profile: {user.get('name')}, Qualification: {user.get('qualification')}, Branch: {user.get('branch')}."
     )
@@ -1219,11 +1279,12 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
             "Authorization": f"Bearer {GROQ_CHAT_API_KEY}",
             "Content-Type": "application/json"
         }
+        
         payload = {
             "model": GROQ_MODEL,
             "messages": [
-                {"role": "system", "content": "You are CareerPulse Assistant, a helpful career advisor for students in India. Keep answers under 150 words."},
-                {"role": "user", "content": f"Profile: {profile_ctx}\nQuestion: {body.message}"}
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": f"Profile: {profile_ctx}\n\nAvailable Database Jobs Context:\n{jobs_context}\n\nUser Question: {body.message}"}
             ]
         }
         
@@ -1240,15 +1301,21 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
         logger.exception("AI chat failed")
         raise HTTPException(status_code=502, detail=f"AI service error: {str(e)}")
 
+    # History entry save
     await db.chat_messages.insert_one({
         "user_id": user["user_id"],
         "session_id": session_id,
         "user_message": body.message,
         "assistant_message": reply,
+        "jobs": [j["job_id"] for j in matching_jobs] if matching_jobs else [],
         "created_at": datetime.now(timezone.utc).isoformat(),
     })
     
-    return {"reply": reply, "session_id": session_id}
+    return {
+        "reply": reply, 
+        "session_id": session_id,
+        "jobs": matching_jobs
+    }
 
 
 @api.get("/ai/history")
