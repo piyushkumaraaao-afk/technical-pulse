@@ -1212,7 +1212,7 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
     session_id = body.session_id or f"chat_{user['user_id']}"
     msg_lower = body.message.lower()
     
-    # 🚀 1. INTENT DETECTION
+    # 1. INTENT DETECTION
     job_keywords = ["job", "vacancy", "recruitment", "apprentice", "internship", "fresher", "post", "apply", "opportunity", "hire", "sarkari"]
     branch_map = {"civil": "Civil", "mechanical": "Mechanical", "mech": "Mechanical", "electrical": "Electrical", "computer": "Computer", "cse": "Computer", "it": "Computer", "fitter": "Fitter", "electrician": "Electrician", "wireman": "Electrician", "welder": "Welder"}
     qual_map = {"diploma": "Diploma", "btech": "BTech", "b.tech": "BTech", "degree": "BTech", "be": "BTech", "12th": "12th", "intermediate": "12th", "twelfth": "12th", "10th": "10th", "matric": "10th", "tenth": "10th", "iti": "ITI", "graduate": "Graduate", "graduation": "Graduate", "b.sc": "Graduate", "bsc": "Graduate"}
@@ -1224,14 +1224,13 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
 
     matching_jobs = []
 
-    # 🚀 2. SMART DATABASE QUERYING (List Crash Fix Applied)
+    # 2. SMART DATABASE QUERYING
     if wants_jobs:
         query_filters = {"is_active": True}
 
-        # A. Branch Filter: Safe extraction from List
         user_branch = user.get("branch")
         if isinstance(user_branch, list) and len(user_branch) > 0:
-            user_branch = user_branch[0]  # List me se text nikal liya
+            user_branch = user_branch[0]
         elif isinstance(user_branch, list):
             user_branch = None
 
@@ -1242,10 +1241,9 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
                 {"post_name": {"$regex": target_branch, "$options": "i"}}
             ]
 
-        # B. Qualification Filter: Safe extraction from List
         user_qual = user.get("qualification")
         if isinstance(user_qual, list) and len(user_qual) > 0:
-            user_qual = user_qual[0]  # List me se text nikal liya
+            user_qual = user_qual[0]
         elif isinstance(user_qual, list):
             user_qual = None
 
@@ -1255,7 +1253,7 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
 
         matching_jobs = await db.jobs.find(query_filters, {"_id": 0}).sort("trending_score", -1).limit(3).to_list(3)
 
-    # 🚀 3. AI CONTEXT BUILDER
+    # 3. AI CONTEXT BUILDER (With Friendly Emoji Prompts)
     profile_ctx = f"Student profile: {user.get('name')}, Qualification: {user.get('qualification')}, Branch: {user.get('branch')}."
     
     if wants_jobs:
@@ -1264,13 +1262,13 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
                 f"- {j.get('post_name')} at {j.get('organization')} (Salary: {j.get('salary', 'NA')})" 
                 for j in matching_jobs
             ])
-            sys_prompt = "You are CareerPulse Assistant. The user is looking for jobs/career advice. Recommend ONLY the specific jobs provided in the context below. Be encouraging and keep answers under 150 words."
+            sys_prompt = "You are CareerPulse Assistant, a very friendly and encouraging career advisor for Indian students. Always speak in a warm, friendly mix of Hindi and English (Hinglish) with exciting emojis (🚀, 🔥, 💼). Recommend ONLY the specific jobs provided in the context below. Keep answers under 100 words."
         else:
             jobs_context = "No direct matching jobs found in the database right now."
-            sys_prompt = "You are CareerPulse Assistant. The user wants jobs based on their query, but there are no matching active jobs in the database currently. Inform them politely. Keep answers under 100 words."
+            sys_prompt = "You are CareerPulse Assistant, a friendly and encouraging career advisor. Speak in Hinglish and use friendly emojis (😅, 🙏, 😊). The user wants jobs based on their query, but there are no matching active jobs in the database currently. Inform them politely. Keep answers under 80 words."
     else:
         jobs_context = ""
-        sys_prompt = "You are CareerPulse Assistant, a helpful career advisor for students in India. Chat naturally, answer general questions, or greet the user politely. Do NOT recommend any jobs unless explicitly asked. Keep answers under 100 words."
+        sys_prompt = "You are CareerPulse Assistant, a friendly career advisor for Indian students. Always speak in a conversational, friendly mix of Hindi and English (Hinglish) with lots of emojis (😊, ✨, 👋). If the user says hi, greet them warmly by their name. If they type gibberish or random letters, playfully ask them what they need (e.g., 'Lagta hai message galti se type ho gaya 😅. Main kaise help kar sakta hoon?'). Do NOT recommend any jobs unless explicitly asked. Keep answers under 80 words."
 
     try:    
         headers = {
@@ -1298,7 +1296,7 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
         logger.exception("AI chat failed")
         raise HTTPException(status_code=502, detail=f"AI service error: {str(e)}")
 
-    # 🚀 4. SAVE TO HISTORY
+    # 4. SAVE TO HISTORY
     await db.chat_messages.insert_one({
         "user_id": user["user_id"],
         "session_id": session_id,
