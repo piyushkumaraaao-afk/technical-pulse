@@ -1212,8 +1212,8 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
     session_id = body.session_id or f"chat_{user['user_id']}"
     msg_lower = body.message.lower()
     
-    # 🚀 1. SMART TYPO & INTENT DETECTION (Ab 'jov', 'nokri', 'kam' sab samjhega)
-    job_keywords = ["job", "jov", "vacancy", "vacansy", "recruitment", "apprentice", "internship", "fresher", "post", "apply", "opportunity", "hire", "sarkari", "naukri", "nokri", "kaam", "work"]
+    # 🚀 1. INTENT & TYPO DETECTION
+    job_keywords = ["job", "jov", "vacancy", "vacansy", "recruitment", "apprentice", "internship", "fresher", "post", "apply", "opportunity", "hire", "sarkari", "naukri", "nokri", "kaam", "work", "suggest"]
     branch_map = {"civil": "Civil", "mechanical": "Mechanical", "mech": "Mechanical", "electrical": "Electrical", "computer": "Computer", "cse": "Computer", "it": "Computer", "fitter": "Fitter", "electrician": "Electrician", "wireman": "Electrician", "welder": "Welder"}
     qual_map = {"diploma": "Diploma", "btech": "BTech", "b.tech": "BTech", "degree": "BTech", "be": "BTech", "12th": "12th", "intermediate": "12th", "twelfth": "12th", "10th": "10th", "matric": "10th", "tenth": "10th", "iti": "ITI", "graduate": "Graduate", "graduation": "Graduate", "b.sc": "Graduate", "bsc": "Graduate"}
 
@@ -1224,11 +1224,11 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
 
     matching_jobs = []
 
-    # 🚀 2. DYNAMIC DATABASE QUERYING (Priority to User Request > User Profile)
+    # 🚀 2. DYNAMIC DATABASE QUERYING
     if wants_jobs:
         query_filters = {"is_active": True}
 
-        # Branch Logic
+        # Branch extraction safely
         user_branch = user.get("branch")
         if isinstance(user_branch, list) and len(user_branch) > 0:
             user_branch = user_branch[0]
@@ -1242,7 +1242,7 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
                 {"post_name": {"$regex": target_branch, "$options": "i"}}
             ]
 
-        # Qualification Logic
+        # Qualification extraction safely
         user_qual = user.get("qualification")
         if isinstance(user_qual, list) and len(user_qual) > 0:
             user_qual = user_qual[0]
@@ -1255,27 +1255,33 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
 
         matching_jobs = await db.jobs.find(query_filters, {"_id": 0}).sort("trending_score", -1).limit(3).to_list(3)
 
-    # 🚀 3. AI CONTEXT BUILDER (Cool Buddy Persona)
-    profile_ctx = f"User Name: {user.get('name')}, Qualification: {user.get('qualification')}, Branch: {user.get('branch')}."
+    # 🚀 3. AI CONTEXT BUILDER (Smart Override)
+    # Agar user alag branch maang raha hai, toh AI ko uski purani branch mat batao taaki wo confuse na ho!
+    display_branch = requested_branch if requested_branch else (user.get('branch') or "")
+    display_qual = requested_qual if requested_qual else (user.get('qualification') or "")
+    profile_ctx = f"User Name: {user.get('name')}, Context Focus: {display_qual} {display_branch}."
     
     if matching_jobs:
         jobs_context = "\n".join([
             f"- {j.get('post_name')} at {j.get('organization')} (Salary: {j.get('salary', 'NA')})" 
             for j in matching_jobs
         ])
+        job_prompt = "I have provided jobs in the context. Recommend them directly and excitedly. Don't mention the word database."
     else:
         jobs_context = "No specific jobs found in the app right now."
+        job_prompt = "No exact jobs in context. Suggest top companies or general upcoming exams for their branch."
 
-    # Master Prompt: Instructing AI to be a cool friend, avoid "database" word, use minimal emojis, and handle jokes/fallback.
-    sys_prompt = """You are CareerPulse Assistant, a cool, witty, and supportive senior buddy for Indian students. Speak in natural, friendly Hinglish. 
-    
+    # 🚀 MASTER SYSTEM PROMPT (Buddy Persona, 2-3 lines, Dating Advice)
+    sys_prompt = f"""You are a cool, supportive college buddy and career advisor for Indian students. Speak in natural Hinglish.
+
     STRICT RULES:
-    1. Act like a close friend. If the user asks for jokes, comedy, motivation, or talks about girlfriends/dating (even adult/18+ jokes), reply playfully, humorously, and comfortably like a real buddy.
-    2. USE MAXIMUM 1 or 2 EMOJIS per message. Do not over-use them. Do not use weird words like 'beta'.
-    3. NEVER use words like 'database', 'system', 'app', or 'backend'. Act as if you personally know the info.
-    4. If the user asks about jobs and CONTEXT is provided below, recommend those specific jobs naturally.
-    5. If they ask for jobs but CONTEXT says 'No specific jobs found', DO NOT say 'I don't have jobs'. Instead, use your own general LLM knowledge to suggest top companies, exams (like SSC JE, RRB, GATE), or career paths for their specific branch/qualification.
-    6. Keep responses under 80-100 words. Keep it chill and helpful."""
+    1. SUPER SHORT: Your reply MUST be ONLY 2 or 3 short lines. Never write long paragraphs.
+    2. EMOJIS: Use strictly 1 or 2 emojis per message.
+    3. NO JUDGMENT: If the user asks for a different branch/degree, DO NOT question them. Just give them what they asked for.
+    4. DATING/GIRLFRIEND RULE: If they ask how to make a girlfriend, reply EXACTLY in this vibe: "Bhai, ye bahut easy hai! Ladki se baat karo, bina baat kiye kuch nahi hoga. Pehle friend banao, aur jyada late karoge toh usse koi aur le jayega 😂 Dar ke aage jeet hai!"
+    5. JOKES: If they want jokes (even mature/college ones), be funny like a friend, not a boring robot.
+    6. FORBIDDEN WORDS: NEVER use words like 'database', 'context', 'AI', or 'system'.
+    7. {job_prompt}"""
 
     try:    
         headers = {
@@ -1287,7 +1293,7 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
             "model": GROQ_MODEL,
             "messages": [
                 {"role": "system", "content": sys_prompt},
-                {"role": "user", "content": f"User Profile: {profile_ctx}\n\nAvailable Context:\n{jobs_context}\n\nUser Question: {body.message}"}
+                {"role": "user", "content": f"User Info: {profile_ctx}\nAvailable Info:\n{jobs_context}\n\nQuestion: {body.message}"}
             ]
         }
         
