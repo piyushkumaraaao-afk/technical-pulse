@@ -24,19 +24,12 @@ import random
 import re
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 from crawl4ai import AsyncWebCrawler
-from urllib.parse import urljoin
 from fastapi import BackgroundTasks, APIRouter
 from pymongo.errors import DuplicateKeyError
-from typing import Optional, List
 from bson import ObjectId
-from flask import Flask, request, jsonify, url_for
-from werkzeug.utils import secure_filename
-from flask import send_from_directory
-
 
 import jwt
 import bcrypt
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, status
 from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -45,7 +38,6 @@ from pydantic import BaseModel, Field, EmailStr
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from google.oauth2 import id_token
 from google.auth.transport import requests
-
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -58,48 +50,267 @@ JWT_ALGORITHM = os.environ.get("JWT_ALGORITHM", "HS256")
 JWT_EXPIRE_MINUTES = int(os.environ.get("JWT_EXPIRE_MINUTES", 10080))
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@careerpulse.com")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
-
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("careerpulse")
 
-# Mongo
+# Mongo Client
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
-_push_client = None                          
+_push_client = None                         
 
-
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+# Groq API Configuration
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama-3.1-8b-instant" 
+GROQ_MODEL = "llama-3.1-8b-instant"
+GROQ_CHAT_API_KEY = os.environ.get("GROQ_CHAT_API_KEY", os.environ.get("GROQ_API_KEY", ""))
+GROQ_SCRAPER_API_KEY = os.environ.get("GROQ_SCRAPER_API_KEY", os.environ.get("GROQ_API_KEY", ""))
 
 ALLOWED_POST_TYPES = {
     "Job", "Admit Card", "Result", "Scholarship", "Apprenticeship",
     "Internship", "Upcoming Exam", "Answer Key", "IGNORE"
 }
 
-app = FastAPI()
+app = FastAPI(title="CareerPulse API")
 
-client = razorpay.Client(
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+api = APIRouter(prefix="/api")
+
+razorpay_client = razorpay.Client(
     auth=(
-        os.getenv("RAZORPAY_KEY_ID"),
-        os.getenv("RAZORPAY_KEY_SECRET")
+        os.getenv("RAZORPAY_KEY_ID", "YOUR_KEY_ID"),
+        os.getenv("RAZORPAY_KEY_SECRET", "YOUR_KEY_SECRET")
     )
 )
 
 @app.post("/create-order")
 def create_order():
-    order = client.order.create({
+    order = razorpay_client.order.create({
         "amount": 1000,  # ₹10 = 1000 paise
         "currency": "INR"
     })
     return order
 
+
+# =======================
+# Pydantic Models
+# =======================
+Qualification = Literal["Diploma", "BTech", "BE", "Final Year Student"]
+Branch = Literal[
+    "Civil Engineering",
+    "Mechanical Engineering",
+    "Electrical Engineering",
+    "Electronics Engineering",
+    "Computer Science",
+]
+JobCategory = Literal["Government", "PSU", "Apprenticeship", "Private", "Internship", "Diploma Eligible"]
+
+class RegisterBody(BaseModel):
+    name: str
+    email: EmailStr
+    password: str
+    phone: Optional[str] = None
+
+class LoginBody(BaseModel):
+    email: EmailStr
+    password: str
+
+class ProfileUpdateBody(BaseModel):
+    name: Optional[str] = None
+    phone: Optional[str] = None
+    qualification: Optional[List[str]] = None 
+    branch: Optional[List[str]] = None
+    passout_year: Optional[int] = None
+    state: Optional[str] = None
+    age: Optional[int] = None
+    avatar: Optional[str] = None
+
+class MessageBody(BaseModel):
+    receiver_id: str
+    text: str
+    type: Optional[str] = "text"
+    jobData: Optional[dict] = None
+    disappearing_hours: Optional[int] = 0
+    time: Optional[str] = None
+
+class EditMessageBody(BaseModel):
+    message_id: str
+    new_text: str  
+
+class JobBody(BaseModel):
+    organization: str
+    post_name: str
+    post_type: str
+    category: JobCategory
+    branches: List[Branch]
+    qualifications: List[Qualification]
+    vacancies: Optional[str] = None
+    salary: Optional[str] = None
+    eligibility: str
+    location: Optional[str] = None
+    state: Optional[str] = None
+    last_date: str
+    notification_pdf: Optional[str] = None
+    apply_link: str
+    min_age: Optional[int] = None
+    max_age: Optional[int] = None
+    description: Optional[str] = None
+    logo_url: Optional[str] = None
+    previous_year_cutoff: Optional[str] = None
+    selection_process: Optional[str] = None
+    important_dates: Optional[str] = None
+    railway_zone: Optional[str] = None
+    medical_standard: Optional[str] = None
+
+class EligibilityCheckBody(BaseModel):
+    job_id: str
+
+class SaveJobBody(BaseModel):
+    job_id: str
+
+class ApplyJobBody(BaseModel):
+    job_id: str
+
+class ResumeBody(BaseModel):
+    full_name: str
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    address: Optional[str] = None
+    objective: Optional[str] = None
+    education: List[dict] = Field(default_factory=list)
+    experience: List[dict] = Field(default_factory=list)
+    projects: List[dict] = Field(default_factory=list)
+    skills: List[str] = Field(default_factory=list)
+    certifications: List[str] = Field(default_factory=list)
+    template: str = "modern"
+    layoutStyle: Optional[str] = "layout1"
+    colorTheme: Optional[str] = "modern"
+
+class ChatBody(BaseModel):
+    message: str
+    session_id: Optional[str] = None
+
+class RegisterPushBody(BaseModel):
+    platform: str
+    device_token: str
+
+class RssSourceBody(BaseModel):
+    name: str
+    url: str
+    default_category: JobCategory = "Government"
+
+class AdminNotifyBody(BaseModel):
+    title: str
+    message: str
+    action_url: Optional[str] = None
+    branch: Optional[str] = None
+    qualification: Optional[str] = None
+
+class FeedbackBody(BaseModel):
+    message: str
+
+class UpgradePremiumBody(BaseModel):
+    payment_id: str
+
+class AdSlot(BaseModel):
+    id: str
+    image: str
+    link: str
+
+class AdsPayload(BaseModel):
+    ads: List[AdSlot]
+
+
+# =======================
+# Auth Utilities
+# =======================
+security = HTTPBearer()
+
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+def verify_password(password: str, hashed: str) -> bool:
+    try:
+        return bcrypt.checkpw(password.encode(), hashed.encode())
+    except Exception:
+        return False
+
+def create_jwt(user_id: str) -> str:
+    payload = {
+        "sub": user_id,
+        "exp": datetime.now(timezone.utc) + timedelta(minutes=JWT_EXPIRE_MINUTES),
+        "iat": datetime.now(timezone.utc),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+def decode_jwt(token: str) -> Optional[str]:
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return payload.get("sub")
+    except Exception:
+        return None
+
+async def get_current_user(request: Request, auth = Depends(security)) -> dict:
+    token = auth.credentials
+    user_id = decode_jwt(token)
+    if user_id:
+        user = await db.users.find_one({"user_id": user_id}, {"_id": 0, "password_hash": 0})
+        if user:
+            return user
+    raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+async def require_admin(user: dict = Depends(get_current_user)) -> dict:
+    if not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user
+
+
+# =======================
+# Push Helper
+# =======================
+async def send_push(recipients: List[str], data: dict, idempotency_key: Optional[str] = None) -> None:
+    if not recipients or _push_client is None:
+        return
+    if "title" not in data or "message" not in data:
+        return
+    for chunk_start in range(0, len(recipients), 100):
+        chunk = recipients[chunk_start:chunk_start + 100]
+        payload: dict = {"recipients": chunk, "data": data}
+        if idempotency_key:
+            payload["$idempotency_key"] = f"{idempotency_key}-{chunk_start}"
+        try:
+            resp = await _push_client.post("/api/v1/push/trigger", json=payload)
+            if resp.status_code >= 400:
+                logger.warning(f"push trigger failed {resp.status_code}: {resp.text[:200]}")
+        except Exception as e:
+            logger.warning(f"push trigger error: {e}")
+
+async def notify_saved_users(parent_job_id, post_type, post_name):
+    users = await db.applications.find(
+        {"job_id": parent_job_id},
+        {"_id": 0, "user_id": 1}
+    ).to_list(1000)
+
+    if users:
+        await send_push(
+            [u["user_id"] for u in users],
+            {
+                "title": f"{post_type} Released",
+                "message": post_name
+            }
+        )
+
+
 # =======================
 # Bulletproof Helper Functions
 # =======================
-
-
 def first_json_object(model_text: str) -> dict:
     model_text = model_text.strip()
     if model_text.startswith("```"):
@@ -117,7 +328,7 @@ def canonical_url(url: str) -> str:
     query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
              if not k.lower().startswith(("utm_", "fbclid", "gclid"))]
     return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/") or "/",
-                       urlencode(query, doseq=True), ""))
+                        urlencode(query, doseq=True), ""))
 
 def detect_post_type(title: str) -> str:
     lower = title.lower()
@@ -134,7 +345,7 @@ def detect_post_type(title: str) -> str:
 def looks_like_detail_link(url: str, title: str) -> bool:
     lower = url.lower()
     path = urlsplit(url).path.rstrip("/").lower()
-    blocked = ("facebook.com", "twitter.com", "[x.com/](https://x.com/)", "instagram.com", "youtube.com", "t.me/", "privacy-policy", "terms-and-conditions", "contact-us", "about-us", "javascript:", "mailto:")
+    blocked = ("facebook.com", "twitter.com", "x.com", "instagram.com", "youtube.com", "t.me/", "privacy-policy", "terms-and-conditions", "contact-us", "about-us", "javascript:", "mailto:")
     category_paths = {"/latestjob", "/result", "/admitcard", "/syllabus", "/answerkey"}
     return (
         url.startswith(("https://", "http://"))
@@ -172,6 +383,7 @@ def generate_content_hash(
     text = f"{organization}|{post_name}|{last_date}"
     return hashlib.sha256(text.lower().encode()).hexdigest()    
 
+
 # =======================
 # Scrapers & Ultra-Smart AI Logic
 # =======================
@@ -206,25 +418,20 @@ async def source_entries(src: dict, client: httpx.AsyncClient) -> list[dict]:
         entries.append({"title": title, "link": link, "summary": f"Latest notification on {src['name']}."})
         if len(entries) >= 40: break
     return entries
+
 def extract_tables_as_json(html: str) -> list:
     tables = []
-
     try:
         dfs = pd.read_html(html)
-
         for df in dfs[:10]:
             try:
                 df = df.fillna("NA")
                 tables.append(df.to_dict("records"))
             except:
                 pass
-
     except Exception:
         pass
-
     return tables
-
-GROQ_SCRAPER_API_KEY = os.environ.get("GROQ_SCRAPER_API_KEY", os.environ.get("GROQ_API_KEY", ""))        
 
 async def extract_job_details_with_ai(url: str) -> dict:
     page_text = ""
@@ -245,8 +452,6 @@ async def extract_job_details_with_ai(url: str) -> dict:
             table_json = extract_tables_as_json(response.text)
             
             if not page_text:
-                # 🚀 BIG FIX HERE: HTML Tables ko pipe (|) formate mein convert kar rahe hain
-                # Taaki AI SAIL Rourkela jaise table (Trade | ITI | Diploma) ko samajh sake
                 for table in soup.find_all("table"):
                     for tr in table.find_all("tr"):
                         for td in tr.find_all(["td", "th"]):
@@ -270,7 +475,6 @@ async def extract_job_details_with_ai(url: str) -> dict:
     except Exception as e:
         print(f"Link extraction failed for {url}: {e}")
 
-    # 🚀 AI PROMPT FIX: Admit Card/Result explicitly valid kiye hain!
     prompt = f"""
     You are an elite Data Extraction AI. Analyze the Markdown content and Links from a recruitment website.
     
@@ -283,13 +487,13 @@ async def extract_job_details_with_ai(url: str) -> dict:
     1. Organization: Look for 'Organization', 'Company', 'Board', 'Commission', 'Institution', 'Employer', 'Conducted By', 'Recruitment Board', 'Bank'.
     2. Post Name: Look for 'Post Name', 'Designation', 'Job Title', 'Position', 'Role', 'Name of the Post', 'Trade Name', 'Apprentice'.
     3. Salary: Look for 'Salary', 'Pay Scale', 'Stipend', 'Remuneration', 'CTC', 'Pay Level', 'Pay Matrix', 'Earnings', 'Wages', 'In Hand'.
-    4. Age Limit: Look for 'Age Limit', 'Minimum Age', 'Maximum Age', 'Age as on', 'Age Relaxation', 'Umar', 'Ayoo'. (Extract MAX absolute age).
+    4. Age Limit: Look for 'Age Limit', 'Minimum Age', 'Maximum Age', 'Age as on', 'Age Relaxation', 'Umar', 'Ayoo'.
     5. Total Post: Look for 'Total Vacancies', 'No. of Post', 'Total Post', 'Number of Vacancies', 'Seat', 'Openings', 'Capacity'.
-    6. Selection Process: Look for 'Selection Process', 'Recruitment Process', 'Exam Pattern', 'Stage', 'CBT', 'Written Exam', 'Interview', 'Physical', 'PET', 'PST', 'Skill Test', 'Document Verification', 'Medical'.
-    7. Last Date: Look for 'Last Date', 'Apply Online Last Date', 'Closing Date', 'Deadline', 'Registration End Date', 'Antim Tithi', 'Valid Till'. (Format as YYYY-MM-DD).
-    8. Qualifications: Look for 'Education Qualification', 'Eligibility', 'Academic Criteria', 'Essential Qualification', 'Passed', 'Degree', 'Diploma', 'ITI', '10th', '12th', 'B.Tech', 'Graduation'.
+    6. Selection Process: Look for 'Selection Process', 'Recruitment Process', 'Exam Pattern', 'Stage', 'CBT', 'Written Exam', 'Interview'.
+    7. Last Date: Look for 'Last Date', 'Apply Online Last Date', 'Closing Date', 'Deadline', 'Registration End Date'.
+    8. Qualifications: Look for 'Education Qualification', 'Eligibility', 'Academic Criteria', 'Essential Qualification', 'Degree', 'Diploma', 'ITI', '10th', '12th', 'B.Tech'.
     9. Location: Look for 'Job Location', 'Posting', 'Place of Posting', 'State', 'City', 'All India'.
-    10. Category/State Vacancies: Look for 'UR', 'Gen', 'Unreserved', 'OBC', 'EWS', 'SC', 'ST', 'PwD', 'Ex-Servicemen' or state names.
+    10. Category/State Vacancies: Look for 'UR', 'Gen', 'Unreserved', 'OBC', 'EWS', 'SC', 'ST', 'PwD', 'Ex-Servicemen'.
 
     JSON SCHEMA TO RETURN (Strictly use these keys):
     {{
@@ -297,24 +501,22 @@ async def extract_job_details_with_ai(url: str) -> dict:
       "organization": "Exact conducting body/company",
       "category": "Choose ONE: ['Government', 'PSU', 'Private']",
       "post_type": "Choose ONE: ['Job', 'Admit Card', 'Result', 'Scholarship', 'Apprenticeship', 'Internship', 'Upcoming Exam', 'IGNORE']",
-      "total_post": "Number only (e.g., 6557)",
+      "total_post": "Number only",
       "category_vacancies": [ {{ "post_name": "Specific Post Name OR Trade", "General": "NA", "OBC": "NA", "EWS": "NA", "SC": "NA", "ST": "NA" }} ],
       "state_wise_vacancies": [ {{ "state_name": "State", "vacancies": "Number" }} ],
-      "trade_wise_vacancies": [ {{ "trade_name": "Trade (e.g., Fitter, COPA)", "ITI": "Number or NA", "Diploma": "Number or NA", "Degree": "Number or NA" }} ],
-      "salary_wise_post_name":[ {{ "post_name": "Specific Post Name OR Trade", "salary": "Salary or Pay scale or Stipend" }} ],
-      "multiple_posts": [
-         {{ "post_name": "Specific Post Name OR Trade", "vacancies": "Number", "eligibility": "Qualification for this specific post" }}
-      ],
+      "trade_wise_vacancies": [ {{ "trade_name": "Trade", "ITI": "Number or NA", "Diploma": "Number or NA", "Degree": "Number or NA" }} ],
+      "salary_wise_post_name":[ {{ "post_name": "Specific Post Name OR Trade", "salary": "Salary" }} ],
+      "multiple_posts": [ {{ "post_name": "Specific Post Name", "vacancies": "Number", "eligibility": "Qualification" }} ],
       "mode_of_selection": ["Array of stages"],
-      "min_age": "Minimum age (number only)",
-      "max_age": "Maximum age (number only)",
-      "salary": "Salary or Pay scale or Stipend or NA",
+      "min_age": "Minimum age",
+      "max_age": "Maximum age",
+      "salary": "Salary or NA",
       "qualifications": ["B.Tech", "Diploma", "10th Pass", "12th Pass", "ITI", "Graduate", "PG"],
       "branches": ["Computer Science", "Mechanical", "Civil", "Electrical", "Electronics", "Fitter", "Welder", "Electrician"],
       "location": "City or State",
       "last_date": "YYYY-MM-DD",
-      "check_official_notice": "Exact Notification URL from LINKS.",
-      "apply_online_link": "Exact Apply URL from LINKS.",
+      "check_official_notice": "Exact Notification URL",
+      "apply_online_link": "Exact Apply URL",
       "admit_card_link": "Exact Admit Card URL",
       "answer_key_link": "Exact Answer Key URL",
       "result_link": "Exact Result URL"
@@ -323,7 +525,7 @@ async def extract_job_details_with_ai(url: str) -> dict:
     --- DATA TO ANALYZE ---
     {page_text}
     
-    --- IMPORTANT LINKS WITH CONTEXT ---
+    --- IMPORTANT LINKS ---
     {links_text}
     --- STRUCTURED TABLE DATA ---
     {json.dumps(table_json)[:4000]}
@@ -335,7 +537,7 @@ async def extract_job_details_with_ai(url: str) -> dict:
         payload = {
             "model": GROQ_MODEL,
             "messages": [
-                {"role": "system", "content": "You are a master data extractor. DO NOT ignore Admit Cards or Results just because salary/vacancy is missing."},
+                {"role": "system", "content": "You are a master data extractor."},
                 {"role": "user", "content": prompt}
             ],
             "response_format": {"type": "json_object"},
@@ -351,7 +553,7 @@ async def extract_job_details_with_ai(url: str) -> dict:
 
 
 # =======================
-# Main Processing Engine
+# Main Background Engine
 # =======================
 async def refresh_jobs_task() -> None:
     print("Background Scraping Started...")
@@ -377,11 +579,12 @@ async def refresh_jobs_task() -> None:
                 continue
 
             for entry in entries:
-                try:  # 🚀 Yahan 'try' shuru hona zaroori hai
+                try:
                     job_link = canonical_url(entry["link"])
                     content_hash = generate_content_hash(
+                        src["name"],
                         entry["title"],
-                        job_link
+                        today_str
                     )
                 
                     duplicate = await db.jobs.find_one(
@@ -401,9 +604,6 @@ async def refresh_jobs_task() -> None:
                     details = await extract_job_details_with_ai(job_link)
 
                     parent_job_id = None
-
-                    # ⚠️ Note: Yahan 'post_type' ya toh define hona chahiye ya 'ai_post_type' use karein
-                    # Maine aapke code ke flow ke mutabiq rakha hai
                     ai_post_type = details.get("post_type", "NA")
                 
                     if ai_post_type == "IGNORE" and title_type in ["Admit Card", "Result", "Scholarship", "Upcoming Exam"]:
@@ -508,7 +708,6 @@ async def refresh_jobs_task() -> None:
                         ).to_list(1000)
 
                         recipients = [x["user_id"] for x in saved_users]
-
                         await send_push(
                             recipients,
                             {
@@ -518,247 +717,30 @@ async def refresh_jobs_task() -> None:
                         )
                     added += 1
 
-                except Exception as inner_exc:  # 🚀 Ab yeh 'try' ke sath perfectly match ho gaya
+                except Exception as inner_exc:
                     print(f"❌ Error processing entry {entry.get('title')}: {inner_exc}")
                     continue
 
     print(f"✅ Scraping cycle finished! +{added} added, {removed} expired")
 
 
-
 # =======================
-# Pydantic Models
+# API Endpoints
 # =======================
-Qualification = Literal["Diploma", "BTech", "BE", "Final Year Student"]
-Branch = Literal[
-    "Civil Engineering",
-    "Mechanical Engineering",
-    "Electrical Engineering",
-    "Electronics Engineering",
-    "Computer Science",
-]
-JobCategory = Literal["Government", "PSU", "Apprenticeship", "Private", "Internship", "Diploma Eligible"]
-
-class RegisterBody(BaseModel):
-    name: str
-    email: EmailStr
-    password: str
-    phone: Optional[str] = None
-
-class LoginBody(BaseModel):
-    email: EmailStr
-    password: str
-
-
-class ProfileUpdateBody(BaseModel):
-    name: Optional[str] = None
-    phone: Optional[str] = None
-    qualification: Optional[List[str]] = None 
-    branch: Optional[List[str]] = None
-    passout_year: Optional[int] = None
-    state: Optional[str] = None
-    age: Optional[int] = None
-    avatar: Optional[str] = None
-
-class MessageBody(BaseModel):
-    receiver_id: str
-    text: str
-    type: Optional[str] = "text" # 'text' ya 'job'
-    jobData: Optional[dict] = None
-    disappearing_hours: Optional[int] = 0 # 0: Off, 24: 24h, 168: 7d, 720: 30d
-    time: Optional[str] = None
-
-class EditMessageBody(BaseModel):
-    message_id: str
-    new_text: str  
-
-class JobBody(BaseModel):
-    organization: str
-    post_name: str
-    post_type: str
-    category: JobCategory
-    branches: List[Branch]
-    qualifications: List[Qualification]
-    vacancies: Optional[str] = None
-    salary: Optional[str] = None
-    eligibility: str
-    location: Optional[str] = None
-    state: Optional[str] = None
-    last_date: str  # ISO date
-    notification_pdf: Optional[str] = None
-    apply_link: str
-    min_age: Optional[int] = None
-    max_age: Optional[int] = None
-    description: Optional[str] = None
-    logo_url: Optional[str] = None
-    previous_year_cutoff: Optional[str] = None
-    selection_process: Optional[str] = None
-    important_dates: Optional[str] = None
-    railway_zone: Optional[str] = None
-    medical_standard: Optional[str] = None
-
-class EligibilityCheckBody(BaseModel):
-    job_id: str
-
-class SaveJobBody(BaseModel):
-    job_id: str
-
-class ApplyJobBody(BaseModel):
-    job_id: str
-
-class ResumeBody(BaseModel):
-    full_name: str
-    phone: Optional[str] = None
-    email: Optional[str] = None
-    address: Optional[str] = None
-    objective: Optional[str] = None
-    education: List[dict] = Field(default_factory=list)
-    experience: List[dict] = Field(default_factory=list)
-    projects: List[dict] = Field(default_factory=list)
-    skills: List[str] = Field(default_factory=list)
-    certifications: List[str] = Field(default_factory=list)
-    template: str = "modern"
-    layoutStyle: Optional[str] = "layout1"  # 🚀 Added to receive layout 1 to 6
-    colorTheme: Optional[str] = "modern"
-
-class ChatBody(BaseModel):
-    message: str
-    session_id: Optional[str] = None
-
-class RegisterPushBody(BaseModel):
-    platform: str
-    device_token: str
-
-class RssSourceBody(BaseModel):
-    name: str
-    url: str
-    default_category: JobCategory = "Government"
-
-class AdminNotifyBody(BaseModel):
-    title: str
-    message: str
-    action_url: Optional[str] = None
-    branch: Optional[str] = None
-    qualification: Optional[str] = None
-
-class FeedbackBody(BaseModel):
-    message: str
-
-class UpgradePremiumBody(BaseModel):
-    payment_id: str
-
-class AdSlot(BaseModel):
-    id: str
-    image: str
-    link: str
-
-class AdsPayload(BaseModel):
-    ads: List[AdSlot]        
-
-# Razorpay client setup karein
-razorpay_client = razorpay.Client(auth=("YOUR_KEY_ID", "YOUR_KEY_SECRET"))
-
-
-# =======================
-# Auth Utilities
-# =======================
-security = HTTPBearer()
-
-def hash_password(password: str) -> str:
-    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-
-def verify_password(password: str, hashed: str) -> bool:
-    try:
-        return bcrypt.checkpw(password.encode(), hashed.encode())
-    except Exception:
-        return False
-
-def create_jwt(user_id: str) -> str:
-    payload = {
-        "sub": user_id,
-        "exp": datetime.now(timezone.utc) + timedelta(minutes=JWT_EXPIRE_MINUTES),
-        "iat": datetime.now(timezone.utc),
-    }
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
-
-def decode_jwt(token: str) -> Optional[str]:
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        return payload.get("sub")
-    except Exception:
-        return None
-
-async def get_current_user(request: Request, auth = Depends(security)) -> dict:
-    token = auth.credentials
-    # Try JWT first
-    user_id = decode_jwt(token)
-    if user_id:
-        user = await db.users.find_one({"user_id": user_id}, {"_id": 0, "password_hash": 0})
-        if user:
-            return user
-
-    raise HTTPException(status_code=401, detail="Invalid or expired token")
-
-async def require_admin(user: dict = Depends(get_current_user)) -> dict:
-    if not user.get("is_admin"):
-        raise HTTPException(status_code=403, detail="Admin access required")
-    return user
-
-# =======================
-# Push Helper
-# =======================
-async def send_push(recipients: List[str], data: dict, idempotency_key: Optional[str] = None) -> None:
-    if not recipients or _push_client is None:
-        return
-    if "title" not in data or "message" not in data:
-        return
-    for chunk_start in range(0, len(recipients), 100):
-        chunk = recipients[chunk_start:chunk_start + 100]
-        payload: dict = {"recipients": chunk, "data": data}
-        if idempotency_key:
-            payload["$idempotency_key"] = f"{idempotency_key}-{chunk_start}"
-        try:
-            resp = await _push_client.post("/api/v1/push/trigger", json=payload)
-            if resp.status_code >= 400:
-                logger.warning(f"push trigger failed {resp.status_code}: {resp.text[:200]}")
-        except Exception as e:
-            logger.warning(f"push trigger error: {e}")
-async def notify_saved_users(parent_job_id, post_type, post_name):
-
-    users = await db.applications.find(
-        {"job_id": parent_job_id},
-        {"_id": 0, "user_id": 1}
-    ).to_list(1000)
-
-    if users:
-        await send_push(
-            [u["user_id"] for u in users],
-            {
-                "title": f"{post_type} Released",
-                "message": post_name
-            }
-        )
-
-
-# =======================
-# App / Router
-# =======================
-app = FastAPI(title="CareerPulse API")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-api = APIRouter(prefix="/api")
-
-
-# 1. Main Base URL (http://127.0.0.1:8000/)
 @app.get("/")
 async def main_root():
     return {"status": "ok", "message": "CareerPulse Backend Running"}
 
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
+
+@api.get("/")
+async def api_root():
+    return {"app": "CareerPulse API", "status": "ok"}
+
+
+# --- Admin & Users ---
 @api.get("/admin/users")
 async def admin_list_users(admin: dict = Depends(require_admin)):
     users_cursor = db.users.find({}, {"password_hash": 0})
@@ -777,23 +759,10 @@ async def admin_list_users(admin: dict = Depends(require_admin)):
             "avatar": u.get("avatar"),
             "created_at": u.get("created_at")
         })
-    return {
-        "users": users,
-        "count": len(users)
-    }
+    return {"users": users, "count": len(users)}
 
 
-# 2. Server Health Check URL
-@app.get("/health")
-async def health():
-    return {"status": "healthy"}
-
-@api.get("/")
-async def api_root():
-    return {"app": "CareerPulse API", "status": "ok"}
-
-
-# ---- Auth ----
+# --- Auth Endpoints ---
 @api.post("/auth/register")
 async def register(body: RegisterBody):
     existing = await db.users.find_one({"email": body.email.lower()})
@@ -814,11 +783,7 @@ async def register(body: RegisterBody):
         "state": None,
         "age": None,
         "avatar": None,
-        "notification_settings": {
-            "job_alert": True,
-            "admit_card": True,
-            "result": True
-        },    
+        "notification_settings": {"job_alert": True, "admit_card": True, "result": True},    
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.users.insert_one(doc)
@@ -842,21 +807,17 @@ class GoogleTokenBody(BaseModel):
 
 @api.post("/auth/google")
 async def google_login(body: GoogleTokenBody):
-
     google_user = id_token.verify_oauth2_token(
         body.id_token,
         requests.Request(),
         GOOGLE_CLIENT_ID
     )
-
     email = google_user["email"].lower()
     name = google_user.get("name", "")
 
     user = await db.users.find_one({"email": email})
-
     if not user:
         user_id = f"user_{uuid.uuid4().hex[:12]}"
-
         await db.users.insert_one({
             "user_id": user_id,
             "email": email,
@@ -864,15 +825,10 @@ async def google_login(body: GoogleTokenBody):
             "auth_provider": "google",
             "is_admin": False
         })
-
         user = await db.users.find_one({"email": email})
 
     token = create_jwt(user["user_id"])
-
-    return {
-        "access_token": token,
-        "user": user
-    }
+    return {"access_token": token, "user": user}
 
 
 @api.get("/auth/me")
@@ -896,44 +852,20 @@ async def update_profile(body: ProfileUpdateBody, user: dict = Depends(get_curre
     updated = await db.users.find_one({"user_id": user["user_id"]}, {"_id": 0, "password_hash": 0})
     return {"user": updated}
 
-@api.put("/notification-settings")
-async def update_notification_settings(
-    body: dict,
-    user: dict = Depends(get_current_user)
-):
-    await db.users.update_one(
-        {"user_id": user["user_id"]},
-        {"$set": {
-            "notification_settings": body
-        }}
-    )
 
+@api.put("/notification-settings")
+async def update_notification_settings(body: dict, user: dict = Depends(get_current_user)):
+    await db.users.update_one({"user_id": user["user_id"]}, {"$set": {"notification_settings": body}})
     return {"ok": True, "settings": body}
 
+
 @api.get("/notification-settings")
-async def get_notification_settings(
-    user: dict = Depends(get_current_user)
-):
-    data = await db.users.find_one(
-        {"user_id": user["user_id"]},
-        {"_id":0, "notification_settings":1}
-    )
-
-    return {
-        "settings": data.get("notification_settings", {
-            "job_alert":True,
-            "admit_card":True,
-            "result":True
-        })
-    }        
+async def get_notification_settings(user: dict = Depends(get_current_user)):
+    data = await db.users.find_one({"user_id": user["user_id"]}, {"_id": 0, "notification_settings": 1})
+    return {"settings": data.get("notification_settings", {"job_alert": True, "admit_card": True, "result": True})}
 
 
-# ---- Jobs ----
-def _clean_job(job: dict) -> dict:
-    job.pop("_id", None)
-    return job
-
-
+# --- Jobs Endpoints ---
 @api.get("/jobs")
 async def list_jobs(
     category: Optional[str] = None,
@@ -943,13 +875,12 @@ async def list_jobs(
     state: Optional[str] = None,
     age: Optional[int] = None,
     search: Optional[str] = None,
-    post_type: Optional[str] = None, # 🚀 Naya parameter add kiya
+    post_type: Optional[str] = None,
     limit: int = 50,
     page: int = 1,
 ):
     q: dict = {"is_active": True}
     
-    # Agar frontend se post_type (jaise 'Job', 'Admit Card', etc.) aaya hai toh filter karein
     if post_type and post_type != "All":
         q["post_type"] = post_type
     elif not post_type:
@@ -974,11 +905,7 @@ async def list_jobs(
             {"$or": [{"max_age": None}, {"max_age": {"$gte": age}}]},
         ]
     if search:
-        await db.search_logs.insert_one({
-            "query": search,
-            "created_at": datetime.now(timezone.utc).isoformat()
-        })    
-    if search:
+        await db.search_logs.insert_one({"query": search, "created_at": datetime.now(timezone.utc).isoformat()})
         q["$or"] = [
             {"post_name": {"$regex": search, "$options": "i"}},
             {"post_type": {"$regex": search, "$options": "i"}},
@@ -987,22 +914,10 @@ async def list_jobs(
         ]
         
     skip = max(0, (page - 1) * limit)
-
-    cursor = (
-        db.jobs.find(q, {"_id": 0})
-        .sort("last_date", 1)
-        .skip(skip)
-        .limit(limit)
-    )
+    cursor = db.jobs.find(q, {"_id": 0}).sort("last_date", 1).skip(skip).limit(limit)
     jobs = await cursor.to_list(length=limit)
     total = await db.jobs.count_documents(q)
-    return {
-    "jobs": jobs,
-    "count": len(jobs),
-    "total": total,
-    "page": page,
-    "limit": limit
-}
+    return {"jobs": jobs, "count": len(jobs), "total": total, "page": page, "limit": limit}
 
 
 @api.get("/jobs/recommended")
@@ -1016,64 +931,43 @@ async def recommended_jobs(user: dict = Depends(get_current_user)):
             {"location": user.get("state")}
         ]
     }
-    jobs = await db.jobs.find(
-        q,
-        {"_id":0}
-    ).sort(
-        [("trending_score",-1),("views",-1)]
-    ).limit(20).to_list(20)
+    jobs = await db.jobs.find(q, {"_id": 0}).sort([("trending_score", -1), ("views", -1)]).limit(20).to_list(20)
     return {"jobs": jobs}
 
 
-@api.get("/jobs/{job_id}")
-async def get_job(
-    job_id: str, 
-    user: dict = Depends(get_current_user)
-):
+@api.get("/jobs/recent")
+async def recent_jobs(user: dict = Depends(get_current_user)):
+    jobs = await db.recent_jobs.aggregate([
+        {"$match": {"user_id": user["user_id"]}},
+        {"$sort": {"viewed_at": -1}},
+        {"$limit": 20},
+        {"$lookup": {"from": "jobs", "localField": "job_id", "foreignField": "job_id", "as": "job"}},
+        {"$unwind": "$job"},
+        {"$replaceRoot": {"newRoot": "$job"}}
+    ]).to_list(20)
+    return {"jobs": jobs}
 
-    await db.jobs.update_one(
-        {"job_id": job_id},
-        {
-            "$inc": {
-                "views": 1,
-                "trending_score": 1
-            }
-        }
-    )
-    
-    job = await db.jobs.find_one(
-        {"job_id": job_id},
-        {"_id": 0}
-    )
-    if user:
-        await db.recent_jobs.update_one(
-            {
-                "user_id": user["user_id"],
-                "job_id": job_id
-            },
-            {
-                "$set": {
-                    "viewed_at": datetime.now(timezone.utc)
-                }
-            },
-            upsert=True
-        )
-    if not job:
-        raise HTTPException(
-            status_code=404,
-            detail="Job not found"
-        )
 
-    return {"job": job}
+@api.get("/jobs/expiring")
+async def expiring():
+    return {"jobs": await db.jobs.find({"is_active": True}, {"_id": 0}).sort("last_date", 1).limit(20).to_list(20)}
+
+
+@api.get("/jobs/for-you")
+async def for_you(user: dict = Depends(get_current_user)):
+    jobs = await db.jobs.find({
+        "is_active": True,
+        "$or": [
+            {"branches": {"$in": [user.get("branch", "")]}},
+            {"qualifications": {"$in": [user.get("qualification", "")]}}
+        ]
+    }, {"_id": 0}).sort("trending_score", -1).limit(20).to_list(20)
+    return {"jobs": jobs}
+
 
 @api.get("/jobs/{job_id}/related")
 async def related_jobs(job_id: str):
-
-    job = await db.jobs.find_one(
-        {"job_id": job_id},
-        {"_id": 0}
-    )
-
+    job = await db.jobs.find_one({"job_id": job_id}, {"_id": 0})
     if not job:
         raise HTTPException(404, "Job not found")
 
@@ -1085,54 +979,24 @@ async def related_jobs(job_id: str):
             {"branches": {"$in": job.get("branches", [])}},
             {"qualifications": {"$in": job.get("qualifications", [])}}
         ]
-    },
-    {"_id": 0}
-    ).limit(10).to_list(10)
-
+    }, {"_id": 0}).limit(10).to_list(10)
     return {"jobs": related}
 
-@api.get("/jobs/recent")
-async def recent_jobs(
-    user: dict = Depends(get_current_user)
-):
 
-    jobs = await db.recent_jobs.aggregate([
-        {"$match": {"user_id": user["user_id"]}},
-        {"$sort": {"viewed_at": -1}},
-        {"$limit": 20},
-        {"$lookup": {
-            "from": "jobs",
-            "localField": "job_id",
-            "foreignField": "job_id",
-            "as": "job"
-        }},
-        {"$unwind": "$job"},
-        {"$replaceRoot": {"newRoot": "$job"}}
-    ]).to_list(20)
-
-    return {"jobs": jobs}
-
-@api.get("/jobs/expiring")
-async def expiring():
-    return {
-        "jobs": await db.jobs.find(
-            {"is_active":True},
-            {"_id":0}
-        ).sort("last_date",1).limit(20).to_list(20)
-    }
-
-@api.get("/jobs/for-you")
-async def for_you(user: dict = Depends(get_current_user)):
-
-    jobs = await db.jobs.find({
-        "is_active": True,
-        "$or": [
-            {"branches": {"$in": [user.get("branch","")]}},
-            {"qualifications": {"$in": [user.get("qualification","")]}}
-        ]
-    }, {"_id": 0}).sort("trending_score",-1).limit(20).to_list(20)
-
-    return {"jobs": jobs}                
+@api.get("/jobs/{job_id}")
+async def get_job(job_id: str, user: dict = Depends(get_current_user)):
+    await db.jobs.update_one({"job_id": job_id}, {"$inc": {"views": 1, "trending_score": 1}})
+    job = await db.jobs.find_one({"job_id": job_id}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    if user:
+        await db.recent_jobs.update_one(
+            {"user_id": user["user_id"], "job_id": job_id},
+            {"$set": {"viewed_at": datetime.now(timezone.utc)}},
+            upsert=True
+        )
+    return {"job": job}
 
 
 @api.post("/jobs/check-eligibility")
@@ -1165,36 +1029,18 @@ async def check_eligibility(body: EligibilityCheckBody, user: dict = Depends(get
     if not user.get("qualification") or not user.get("branch"):
         reasons.append("Complete your profile for accurate check")
 
-    return {
-        "eligible": eligible,
-        "reasons": reasons,
-        "job_id": body.job_id,
-    }
+    return {"eligible": eligible, "reasons": reasons, "job_id": body.job_id}
 
 
-# ---- Application Tracker ----
+# --- Applications & Tracker ---
 @api.post("/applications/save")
-async def save_job(
-    body: SaveJobBody,
-    user: dict = Depends(get_current_user)
-):
-
-    job = await db.jobs.find_one(
-        {"job_id": body.job_id},
-        {"_id": 0}
-    )
-
+async def save_job(body: SaveJobBody, user: dict = Depends(get_current_user)):
+    job = await db.jobs.find_one({"job_id": body.job_id}, {"_id": 0})
     if not job:
-        raise HTTPException(
-            status_code=404,
-            detail="Job not found"
-        )
+        raise HTTPException(status_code=404, detail="Job not found")
 
     result = await db.applications.update_one(
-        {
-            "user_id": user["user_id"],
-            "job_id": body.job_id
-        },
+        {"user_id": user["user_id"], "job_id": body.job_id},
         {
             "$setOnInsert": {
                 "user_id": user["user_id"],
@@ -1211,68 +1057,24 @@ async def save_job(
     )
 
     if result.upserted_id:
-        await db.jobs.update_one(
-            {"job_id": body.job_id},
-            {
-                "$inc": {
-                    "saves": 1,
-                    "trending_score": 3
-                }
-            }
-        )
+        await db.jobs.update_one({"job_id": body.job_id}, {"$inc": {"saves": 1, "trending_score": 3}})
 
-    await send_push(
-        [user["user_id"]],
-        {
-            "title": "Job Saved",
-            "message": job["post_name"]
-        }
-    )
-
+    await send_push([user["user_id"]], {"title": "Job Saved", "message": job["post_name"]})
     return {"ok": True}
 
 
 @api.post("/applications/apply")
-async def apply_job(
-    body: ApplyJobBody,
-    user: dict = Depends(get_current_user)
-):
-
-    job = await db.jobs.find_one(
-        {"job_id": body.job_id},
-        {"_id": 0}
-    )
-
+async def apply_job(body: ApplyJobBody, user: dict = Depends(get_current_user)):
+    job = await db.jobs.find_one({"job_id": body.job_id}, {"_id": 0})
     if not job:
-        raise HTTPException(
-            status_code=404,
-            detail="Job not found"
-        )
+        raise HTTPException(status_code=404, detail="Job not found")
 
-    existing = await db.applications.find_one(
-        {
-            "user_id": user["user_id"],
-            "job_id": body.job_id,
-            "status": "applied"
-        }
-    )
-
+    existing = await db.applications.find_one({"user_id": user["user_id"], "job_id": body.job_id, "status": "applied"})
     if not existing:
-        await db.jobs.update_one(
-            {"job_id": body.job_id},
-            {
-                "$inc": {
-                    "applications": 1,
-                    "trending_score": 5
-                }
-            }
-        )
+        await db.jobs.update_one({"job_id": body.job_id}, {"$inc": {"applications": 1, "trending_score": 5}})
 
     await db.applications.update_one(
-        {
-            "user_id": user["user_id"],
-            "job_id": body.job_id
-        },
+        {"user_id": user["user_id"], "job_id": body.job_id},
         {
             "$set": {
                 "user_id": user["user_id"],
@@ -1288,35 +1090,16 @@ async def apply_job(
         upsert=True
     )
 
-    await send_push(
-        [user["user_id"]],
-        {
-            "title": "Application Submitted",
-            "message": job["post_name"]
-        }
-    )
-
+    await send_push([user["user_id"]], {"title": "Application Submitted", "message": job["post_name"]})
     return {"ok": True}
+
 
 @api.get("/applications/my")
 async def my_applications(user: dict = Depends(get_current_user)):
-
     items = await db.applications.aggregate([
         {"$match": {"user_id": user["user_id"]}},
-        {
-            "$lookup": {
-                "from": "jobs",
-                "localField": "job_id",
-                "foreignField": "job_id",
-                "as": "job"
-            }
-        },
-        {
-            "$unwind": {
-                "path": "$job",
-                "preserveNullAndEmptyArrays": True
-            }
-        },
+        {"$lookup": {"from": "jobs", "localField": "job_id", "foreignField": "job_id", "as": "job"}},
+        {"$unwind": {"path": "$job", "preserveNullAndEmptyArrays": True}},
         {"$sort": {"updated_at": -1}},
         {"$project": {
             "_id": 0,
@@ -1329,38 +1112,31 @@ async def my_applications(user: dict = Depends(get_current_user)):
             "updated_at": 1
         }}
     ]).to_list(500)
-
-    return {"items": items}    
+    return {"items": items}
 
 
 @api.get("/applications")
 async def get_applications(user: dict = Depends(get_current_user)):
     apps = await db.applications.find({"user_id": user["user_id"]}, {"_id": 0}).to_list(500)
     job_ids = [a["job_id"] for a in apps]
-    related_updates = await db.jobs.find({
-        "parent_job_id": {"$in": job_ids}
-    }, {"_id": 0}).to_list(500)
+    related_updates = await db.jobs.find({"parent_job_id": {"$in": job_ids}}, {"_id": 0}).to_list(500)
 
     updates_map = {}
-
     for item in related_updates:
         pid = item["parent_job_id"]
-
-        if pid not in updates_map:
-            updates_map[pid] = []
-
+        if pid not in updates_map: updates_map[pid] = []
         updates_map[pid].append(item)
+
     jobs_list = await db.jobs.find({"job_id": {"$in": job_ids}}, {"_id": 0}).to_list(500)
     jobs_map = {j["job_id"]: j for j in jobs_list}
-    saved = []
-    applied = []
-    upcoming = []
+    
+    saved, applied, upcoming = [], [], []
     today = date.today().isoformat()
     week_later = (date.today() + timedelta(days=7)).isoformat()
+    
     for a in apps:
         job = jobs_map.get(a["job_id"])
-        if not job:
-            continue
+        if not job: continue
         item = {
             **a,
             "job": job,
@@ -1371,53 +1147,36 @@ async def get_applications(user: dict = Depends(get_current_user)):
             "answer_key_link": job.get("answer_key_link"),
             "result_link": job.get("result_link")
         }
-        if a["status"] == "applied":
-            applied.append(item)
-        else:
-            saved.append(item)
+        if a["status"] == "applied": applied.append(item)
+        else: saved.append(item)
+        
         ld = job.get("last_date", "")
-        if today <= ld <= week_later:
-            upcoming.append(item)
+        if today <= ld <= week_later: upcoming.append(item)
+        
     return {"saved": saved, "applied": applied, "upcoming": upcoming}
 
 
 @api.delete("/applications/{job_id}")
 async def remove_application(job_id: str, user: dict = Depends(get_current_user)):
-    app = await db.applications.find_one(
-        {"user_id": user["user_id"], "job_id": job_id}
-    )
-
-    if app:
-        field = "applications" if app["status"] == "applied" else "saves"
-
-        await db.jobs.update_one(
-            {"job_id": job_id},
-            {"$inc": {field: -1}}
-        )
-
-        await db.applications.delete_one(
-            {"user_id": user["user_id"], "job_id": job_id}
-        )
-
+    app_doc = await db.applications.find_one({"user_id": user["user_id"], "job_id": job_id})
+    if app_doc:
+        field = "applications" if app_doc["status"] == "applied" else "saves"
+        await db.jobs.update_one({"job_id": job_id}, {"$inc": {field: -1}})
+        await db.applications.delete_one({"user_id": user["user_id"], "job_id": job_id})
     return {"ok": True}
+
 
 @api.get("/applications/tracker")
 async def tracker(user: dict = Depends(get_current_user)):
-
-    apps = await db.applications.find(
-        {"user_id": user["user_id"]},
-        {"_id": 0}
-    ).to_list(500)
-
-    return {"applications": apps}    
+    apps = await db.applications.find({"user_id": user["user_id"]}, {"_id": 0}).to_list(500)
+    return {"applications": apps}
 
 
-# ---- Resume ----
+# --- Resume Endpoints ---
 @api.post("/resumes")
 async def save_resume(body: ResumeBody, user: dict = Depends(get_current_user)):
     resume_id = f"res_{uuid.uuid4().hex[:10]}"
-    doc = {"resume_id": resume_id, "user_id": user["user_id"],
-           **body.model_dump(), "created_at": datetime.now(timezone.utc).isoformat()}
+    doc = {"resume_id": resume_id, "user_id": user["user_id"], **body.model_dump(), "created_at": datetime.now(timezone.utc).isoformat()}
     await db.resumes.insert_one(doc)
     doc.pop("_id", None)
     return {"resume": doc}
@@ -1447,7 +1206,7 @@ async def delete_resume(resume_id: str, user: dict = Depends(get_current_user)):
     return {"ok": True}
 
 
-# ---- AI Career Assistant ----
+# --- AI Career Assistant Endpoints ---
 @api.post("/ai/chat")
 async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
     session_id = body.session_id or f"chat_{user['user_id']}"
@@ -1456,13 +1215,12 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
     )
     
     try:    
-        groq_url = "https://api.groq.com/openai/v1/chat/completions"
         headers = {
             "Authorization": f"Bearer {GROQ_CHAT_API_KEY}",
             "Content-Type": "application/json"
         }
         payload = {
-            "model": "llama-3.1-8b-instant", # 🚀 Model name correct kar diya gaya hai
+            "model": GROQ_MODEL,
             "messages": [
                 {"role": "system", "content": "You are CareerPulse Assistant, a helpful career advisor for students in India. Keep answers under 150 words."},
                 {"role": "user", "content": f"Profile: {profile_ctx}\nQuestion: {body.message}"}
@@ -1470,9 +1228,7 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
         }
         
         async with httpx.AsyncClient(timeout=20.0) as client:
-            resp = await client.post(groq_url, headers=headers, json=payload)
-            
-            # 🔍 Agar status 200 nahi hai, toh exact error log me print hoga
+            resp = await client.post(GROQ_URL, headers=headers, json=payload)
             if resp.status_code != 200:
                 print(f"❌ Groq API Failed! Status: {resp.status_code}, Response: {resp.text}")
                 raise Exception(f"Groq API Error: {resp.text}")
@@ -1502,6 +1258,13 @@ async def ai_history(session_id: Optional[str] = None, user: dict = Depends(get_
         {"user_id": user["user_id"], "session_id": sid}, {"_id": 0}
     ).sort("created_at", 1).to_list(200)
     return {"messages": msgs, "session_id": sid}
+
+# Include API Router
+app.include_dir = app.include_router(api)
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("server:app", host="0.0.0.0", port=8080, reload=True)
 
 
 # ---- Push ----
