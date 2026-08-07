@@ -1324,19 +1324,29 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
 
 
 @api.get("/ai/history")
-async def ai_history(session_id: Optional[str] = None, user: dict = Depends(get_current_user)):
-    sid = session_id or f"chat_{user['user_id']}"
-    msgs = await db.chat_messages.find(
-        {"user_id": user["user_id"], "session_id": sid}, {"_id": 0}
-    ).sort("created_at", 1).to_list(200)
-    return {"messages": msgs, "session_id": sid}
+async def get_ai_history(user: dict = Depends(get_current_user)):
+    session_id = f"chat_{user['user_id']}"
+    # Database se us user ki sari chat messages nikaalein
+    cursor = db.chat_messages.find({"user_id": user["user_id"]}).sort("created_at", 1)
+    messages_db = await cursor.to_list(100)
+    
+    formatted_messages = []
+    for m in messages_db:
+        job_ids = m.get("jobs", [])
+        job_items = []
+        
+        # 🚀 Agar message ke sath jobs save thi, toh unko database se fetch karke bhejo
+        if job_ids:
+            jobs_cursor = db.jobs.find({"job_id": {"$in": job_ids}}, {"_id": 0})
+            job_items = await jobs_cursor.to_list(10)
 
-# Include API Router
-app.include_dir = app.include_router(api)
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("server:app", host="0.0.0.0", port=8080, reload=True)
+        formatted_messages.append({
+            "user_message": m.get("user_message"),
+            "assistant_message": m.get("assistant_message"),
+            "jobs": job_items # 🚀 Ab card bhi history ke sath wapas aayenge!
+        })
+        
+    return {"messages": formatted_messages, "session_id": session_id}
 
 
 # ---- Push ----
