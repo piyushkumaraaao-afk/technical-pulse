@@ -43,6 +43,8 @@ from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from google.oauth2 import id_token
+from google.auth.transport import requests
 
 
 ROOT_DIR = Path(__file__).parent
@@ -97,9 +99,6 @@ def create_order():
 # Bulletproof Helper Functions
 # =======================
 
-def generate_content_hash(title: str, organization: str, link: str) -> str:
-    content = f"{title}|{organization}|{link}".lower().strip()
-    return hashlib.sha256(content.encode()).hexdigest()
 
 def first_json_object(model_text: str) -> dict:
     model_text = model_text.strip()
@@ -223,7 +222,9 @@ def extract_tables_as_json(html: str) -> list:
     except Exception:
         pass
 
-    return tables    
+    return tables
+
+GROQ_SCRAPER_API_KEY = os.environ.get("GROQ_SCRAPER_API_KEY", os.environ.get("GROQ_API_KEY", ""))        
 
 async def extract_job_details_with_ai(url: str) -> dict:
     page_text = ""
@@ -329,8 +330,8 @@ async def extract_job_details_with_ai(url: str) -> dict:
     """
 
     try:
-        await asyncio.sleep(1) 
-        headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+        await asyncio.sleep(2) 
+        headers = {"Authorization": f"Bearer {GROQ_SCRAPER_API_KEY}", "Content-Type": "application/json"}
         payload = {
             "model": GROQ_MODEL,
             "messages": [
@@ -443,6 +444,10 @@ async def refresh_jobs_task() -> None:
 
                 if similar:
                     continue
+
+                except Exception as inner_exc:
+                    print(f"❌ Error processing entry {entry.get('title')}: {inner_exc}")
+                    continue # Ek kharab job ki wajah se baki sab band nahi honge    
 
                 await db.jobs.insert_one({
                     "job_id": f"job_{uuid.uuid4().hex[:12]}",
@@ -836,9 +841,6 @@ async def login(body: LoginBody):
     return {"access_token": token, "token_type": "bearer", "user": user_public}
 
 
-    from google.oauth2 import id_token
-from google.auth.transport import requests
-
 class GoogleTokenBody(BaseModel):
     id_token: str
 
@@ -935,21 +937,6 @@ def _clean_job(job: dict) -> dict:
     job.pop("_id", None)
     return job
 
-
-@app.get("/jobs")
-async def get_all_jobs(limit: int = 100):
-    jobs_cursor = db.jobs.find({}).limit(limit)
-    jobs_list = []
-    async for j in jobs_cursor:
-        jobs_list.append({
-            "job_id": str(j.get("job_id") or j.get("_id")), # Ensure job_id hamesha jaye
-            "post_name": j.get("post_name"),
-            "post_type": j.get("post_type", "Job"),
-            "organization": j.get("organization"),
-                       "is_trending": j.get("is_trending", False),
-            # ... baaki fields
-        })
-    return {"jobs": jobs_list}
 
 @api.get("/jobs")
 async def list_jobs(
@@ -1475,7 +1462,7 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
     try:    
         groq_url = "https://api.groq.com/openai/v1/chat/completions"
         headers = {
-            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Authorization": f"Bearer {GROQ_CHAT_API_KEY}",
             "Content-Type": "application/json"
         }
         payload = {
