@@ -1462,23 +1462,27 @@ async def ai_chat(body: ChatBody, user: dict = Depends(get_current_user)):
             "Content-Type": "application/json"
         }
         payload = {
-            "model": "llama3.1-8b-instant",
+            "model": "llama-3.1-8b-instant", # 🚀 Model name correct kar diya gaya hai
             "messages": [
                 {"role": "system", "content": "You are CareerPulse Assistant, a helpful career advisor for students in India. Keep answers under 150 words."},
                 {"role": "user", "content": f"Profile: {profile_ctx}\nQuestion: {body.message}"}
             ]
         }
         
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(timeout=20.0) as client:
             resp = await client.post(groq_url, headers=headers, json=payload)
+            
+            # 🔍 Agar status 200 nahi hai, toh exact error log me print hoga
             if resp.status_code != 200:
-                raise Exception("AI API Error")
+                print(f"❌ Groq API Failed! Status: {resp.status_code}, Response: {resp.text}")
+                raise Exception(f"Groq API Error: {resp.text}")
+                
             data = resp.json()
             reply = data['choices'][0]['message']['content']
             
     except Exception as e:
         logger.exception("AI chat failed")
-        raise HTTPException(status_code=502, detail=f"AI service error: {e}")
+        raise HTTPException(status_code=502, detail=f"AI service error: {str(e)}")
 
     await db.chat_messages.insert_one({
         "user_id": user["user_id"],
