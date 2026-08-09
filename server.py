@@ -401,12 +401,21 @@ def fallback_qualifications(title: str, summary: str, qualifications: list) -> l
             
     return found or ["Not Specified"]
 
-# Yeh model ekdum halka hai aur server par free run hota hai
-model = SentenceTransformer('all-MiniLM-L6-v2')
+
+# Global variable ko None rakhein shuru mein
+_ml_model = None
+
+def get_embedding_model():
+    global _ml_model
+    if _ml_model is None:
+        # Model sirf pehli search query par load hoga, server start hote waqt nahi!
+        _ml_model = SentenceTransformer('all-MiniLM-L6-v2')
+    return _ml_model
 
 def get_embedding(text: str) -> list:
     if not text:
         return []
+    model = get_embedding_model()
     embedding = model.encode(text)
     return embedding.tolist()        
 
