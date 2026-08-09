@@ -2160,7 +2160,7 @@ async def search_users(email: str = "", current_user: dict = Depends(get_current
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@api.get("/api/ai-search")
+@api.get("/ai-search")
 async def ai_search(q: str):
     user_query = q.strip()
     if not user_query:
@@ -2385,7 +2385,7 @@ async def upgrade_to_premium(body: UpgradePremiumBody, user: dict = Depends(get_
     return {"message": "Welcome to Premium!", "is_premium": True, "expires_at": expiry_date.isoformat()}
 
 
-@api.post("/api/razorpay-webhook")
+@api.post("/razorpay-webhook")
 async def razorpay_webhook(request: Request, x_razorpay_signature: str = Header(None)):
     # ... (your existing signature validation code) ...
     
@@ -2441,7 +2441,7 @@ async def verify_payment(body: VerifyPaymentBody, user: dict = Depends(get_curre
             "message": "Payment not received yet. Please wait a minute or refresh."
         }
 
-@api.get("/api/jobs/for-you")
+@api.get("/jobs/for-you")
 async def for_you(user: dict = Depends(get_current_user)):
     try:
         user_branch = user.get("branch", [])
