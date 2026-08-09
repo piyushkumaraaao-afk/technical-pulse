@@ -85,7 +85,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-api = APIRouter
+api = APIRouter()
 
 razorpay_client = razorpay.Client(
     auth=(
