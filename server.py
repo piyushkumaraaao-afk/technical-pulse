@@ -2140,7 +2140,7 @@ from appwrite.query import Query
 # 1. MESSAGE SEND KARNE KE LIYE
 from datetime import datetime, timedelta
 
-@api.get("/users/search")
+@api.get("/api/users/search")
 async def search_users(email: str = "", current_user: dict = Depends(get_current_user)):
     try:
         email_query = email.strip().lower()
@@ -2197,7 +2197,7 @@ async def ai_search(q: str):
 
 
 # --- 4. SEND MESSAGE ENDPOINT (With Disappearing Logic) ---
-@api.post("/messages")
+@api.post("/api/messages")
 async def send_message(body: MessageBody, user: dict = Depends(get_current_user)):
     try:
         sender_id = user["user_id"]
@@ -2235,7 +2235,7 @@ async def send_message(body: MessageBody, user: dict = Depends(get_current_user)
 
 
 # --- 5. GET CHAT MESSAGES BETWEEN TWO USERS ---
-@api.get("/messages/{other_user_id}")
+@api.get("/api/messages/{other_user_id}")
 async def get_chat_messages(other_user_id: str, current_user: dict = Depends(get_current_user)):
     try:
         my_id = current_user["user_id"]
@@ -2267,7 +2267,7 @@ class DeleteChatBody(BaseModel):
 # ==========================================
 # 1. ADD / REMOVE FRIEND ENDPOINTS
 # ==========================================
-@api.post("/friends/add")
+@api.post("/api/friends/add")
 async def add_friend(body: FriendBody, user: dict = Depends(get_current_user)):
     my_id = user["user_id"]
     friend_id = body.friend_id
@@ -2277,7 +2277,7 @@ async def add_friend(body: FriendBody, user: dict = Depends(get_current_user)):
     
     return {"message": "Friend added successfully"}
 
-@api.post("/friends/remove")
+@api.post("/api/friends/remove")
 async def remove_friend(body: FriendBody, user: dict = Depends(get_current_user)):
     my_id = user["user_id"]
     friend_id = body.friend_id
@@ -2287,7 +2287,7 @@ async def remove_friend(body: FriendBody, user: dict = Depends(get_current_user)
     
     return {"message": "Friend removed successfully"}
 
-@api.get("/friends")
+@api.get("/api/friends")
 async def get_friends(user: dict = Depends(get_current_user)):
     my_id = user["user_id"]
     me = await db.users.find_one({"user_id": my_id})
@@ -2303,7 +2303,7 @@ async def get_friends(user: dict = Depends(get_current_user)):
 # ==========================================
 # 2. DELETE MESSAGES (For Me / For Everyone)
 # ==========================================
-@api.post("/messages/delete")
+@api.post("/api/messages/delete")
 async def delete_messages(body: DeleteMessagesBody, user: dict = Depends(get_current_user)):
     my_id = user["user_id"]
     
@@ -2344,7 +2344,7 @@ async def delete_messages(body: DeleteMessagesBody, user: dict = Depends(get_cur
 
     return {"message": "Invalid operation"}
 
-@api.put("/messages/edit")
+@api.put("/api/messages/edit")
 async def edit_message(body: EditMessageBody, user: dict = Depends(get_current_user)):
     my_id = user["user_id"]
     
@@ -2368,7 +2368,7 @@ async def edit_message(body: EditMessageBody, user: dict = Depends(get_current_u
 
 from datetime import datetime, timedelta, timezone
 
-@api.post("/users/upgrade")
+@api.post("/api/users/upgrade")
 async def upgrade_to_premium(body: UpgradePremiumBody, user: dict = Depends(get_current_user)):
     my_id = user["user_id"]
     expiry_date = datetime.now(timezone.utc) + timedelta(days=30)
