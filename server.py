@@ -28,6 +28,7 @@ from fastapi import BackgroundTasks, APIRouter
 from pymongo.errors import DuplicateKeyError
 from bson import ObjectId
 from contextlib import asynccontextmanager
+from tenacity import retry, stop_after_attempt, wait_exponential
 from sentence_transformers import SentenceTransformer
 
 import jwt
@@ -752,6 +753,13 @@ async def refresh_jobs_task() -> None:
                     continue
 
     print(f"✅ Scraping cycle finished! +{added} added, {removed} expired")
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+async def safe_groq_call(payload, headers):
+    async with httpx.AsyncClient(timeout=45.0) as ai_client:
+        resp = await ai_client.post(GROQ_URL, headers=headers, json=payload)
+        resp.raise_for_status()
+        return resp.json()    
 
 
 # =======================
