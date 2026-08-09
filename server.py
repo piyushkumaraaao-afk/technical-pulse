@@ -3155,4 +3155,4 @@ async def generate_embeddings_for_old_jobs(admin: dict = Depends(require_admin))
             )
             count += 1
             
-    return {"success": True, "message": f"Embeddings generated successfully for {count} jobs!"}}
+    return {"success": True, "message": f"Embeddings generated successfully for {count} jobs!"}
