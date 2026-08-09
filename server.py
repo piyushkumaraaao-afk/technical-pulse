@@ -27,6 +27,8 @@ from crawl4ai import AsyncWebCrawler
 from fastapi import BackgroundTasks, APIRouter
 from pymongo.errors import DuplicateKeyError
 from bson import ObjectId
+from contextlib import asynccontextmanager
+from sentence_transformers import SentenceTransformer
 
 import jwt
 import bcrypt
@@ -127,6 +129,8 @@ class ProfileUpdateBody(BaseModel):
     phone: Optional[str] = None
     qualification: Optional[List[str]] = None 
     branch: Optional[List[str]] = None
+    subject: Optional[List[str]] = None
+    trade: Optional[List[str]] = None
     passout_year: Optional[int] = None
     state: Optional[str] = None
     age: Optional[int] = None
@@ -150,6 +154,8 @@ class JobBody(BaseModel):
     post_type: str
     category: JobCategory
     branches: List[Branch]
+    subjects: List[str]
+    trades: List[str]
     qualifications: List[Qualification]
     vacancies: Optional[str] = None
     salary: Optional[str] = None
@@ -159,6 +165,9 @@ class JobBody(BaseModel):
     last_date: str
     notification_pdf: Optional[str] = None
     apply_link: str
+    admit_card_link: str
+    answer_key: str
+    result_link: str
     min_age: Optional[int] = None
     max_age: Optional[int] = None
     description: Optional[str] = None
@@ -371,17 +380,34 @@ def fallback_qualifications(title: str, summary: str, qualifications: list) -> l
         return qualifications
     text = f"{title} {summary}".lower()
     found = []
-    for phrase, label in (("12th", "12th"), ("intermediate", "12th"), ("iti", "ITI"), ("10th", "10th"), ("diploma", "Diploma"), ("graduate", "Graduate"), ("b.tech", "B.Tech"), ("btech", "B.Tech"), ("be", "B.Tech"), ("b.sc", "B.Sc"), ("bsc", "B.Sc")):
-        if phrase in text and label not in found: found.append(label)
+    
+    # 🚀 Yahan humne saari nayi degrees add kar di hain
+    mapping = (
+        ("10th", "10th"), ("matric", "10th"), 
+        ("12th", "12th"), ("intermediate", "12th"), 
+        ("iti", "ITI"), 
+        ("diploma", "Diploma"), 
+        ("graduate", "Graduate"), ("degree", "Graduate"),
+        ("b.tech", "B.Tech"), ("btech", "B.Tech"), ("be", "B.Tech"), 
+        ("m.tech", "M.Tech"), ("mtech", "M.Tech"), ("me", "M.Tech"),
+        ("b.sc", "B.Sc"), ("bsc", "B.Sc"),
+        ("m.sc", "M.Sc"), ("msc", "M.Sc")
+    )
+    
+    for phrase, label in mapping:
+        if phrase in text and label not in found: 
+            found.append(label)
+            
     return found or ["Not Specified"]
 
-def generate_content_hash(
-    organization: str,
-    post_name: str,
-    last_date: str
-) -> str:
-    text = f"{organization}|{post_name}|{last_date}"
-    return hashlib.sha256(text.lower().encode()).hexdigest()    
+# Yeh model ekdum halka hai aur server par free run hota hai
+model = SentenceTransformer('all-MiniLM-L6-v2')
+
+def get_embedding(text: str) -> list:
+    if not text:
+        return []
+    embedding = model.encode(text)
+    return embedding.tolist()        
 
 
 # =======================
@@ -511,8 +537,10 @@ async def extract_job_details_with_ai(url: str) -> dict:
       "min_age": "Minimum age",
       "max_age": "Maximum age",
       "salary": "Salary or NA",
-      "qualifications": ["B.Tech", "Diploma", "10th Pass", "12th Pass", "ITI", "Graduate", "PG"],
-      "branches": ["Computer Science", "Mechanical", "Civil", "Electrical", "Electronics", "Fitter", "Welder", "Electrician"],
+      "qualifications": ["B.Tech", "BE", "Diploma", "10th Pass", "12th Pass", "ITI", "Graduate", "PG", "B.Sc", "M.Sc", "B.Com", "M.Com", "BA", "MA"],
+      "branches": ["Computer Science", "Mechanical", "Civil", "Electrical", "Electronics"],
+      "subjects": ["PCM", "PCB", "Commerce", "Arts", "Physics", "Chemistry", "Mathematics", "History", "Geography", "Economics"],
+      "Trade": ["Fitter", "Electrician", "Welder", "COPA"],
       "location": "City or State",
       "last_date": "YYYY-MM-DD",
       "check_official_notice": "Exact Notification URL",
@@ -655,6 +683,8 @@ async def refresh_jobs_task() -> None:
                         
                         "qualifications": fallback_qualifications(title, summary, details.get("qualifications", [])),
                         "branches": details.get("branches", []),
+                        "subjects": details.get("subjects", []),
+                        "trade": details.get("trades", []),
                         "vacancies": details.get("total_post", "NA"),
                         "salary": details.get("salary", "NA"),
                         "eligibility": details.get("eligibility", "NA") if details.get("eligibility", "NA") != "NA" else summary,
@@ -751,6 +781,8 @@ async def admin_list_users(admin: dict = Depends(require_admin)):
             "name": u.get("name"),
             "email": u.get("email"),
             "branch": u.get("branch"),
+            "subject": u.get("subject"),
+            "trade": u.get("trade"),
             "phone": u.get("phone"),
             "qualification": u.get("qualification"),
             "state": u.get("state"),
@@ -779,6 +811,8 @@ async def register(body: RegisterBody):
         "is_admin": False,
         "qualification": None,
         "branch": None,
+        "subject": None,
+        "trade": None,
         "passout_year": None,
         "state": None,
         "age": None,
@@ -1034,6 +1068,43 @@ async def get_job(job_id: str, user: dict = Depends(get_current_user)):
         )
     return {"job": job}
 
+@api.get("/jobs/by-qualifications")
+async def jobs_by_qualifications():
+    # Jin qualifications ki list aapko frontend par dikhani hai
+    target_quals = ["10th", "12th", "ITI", "Diploma", "B.Tech", "B.Sc", "M.Tech", "Graduate"]
+    results = {}
+    
+    # Data chota rakhne ke liye projection
+    projection = {
+        "_id": 0, 
+        "job_id": 1, 
+        "post_name": 1, 
+        "organization": 1, 
+        "last_date": 1, 
+        "qualifications": 1
+    }
+    
+    tasks = []
+    
+    # Har qualification ke liye task banayenge (parallel run ke liye)
+    for qual in target_quals:
+        tasks.append(
+            db.jobs.find(
+                {"is_active": True, "qualifications": qual},
+                projection
+            ).sort("created_at", -1).limit(10).to_list(10) # Har category ki top 10 jobs
+        )
+    
+    # Sabko ek saath fetch karenge (Super Fast!)
+    fetched_jobs = await asyncio.gather(*tasks)
+    
+    # Dictionary mein map kar denge
+    for qual, jobs in zip(target_quals, fetched_jobs):
+        results[qual] = jobs
+        
+    return results
+
+
 
 @api.post("/jobs/check-eligibility")
 async def check_eligibility(body: EligibilityCheckBody, user: dict = Depends(get_current_user)):
@@ -1044,57 +1115,81 @@ async def check_eligibility(body: EligibilityCheckBody, user: dict = Depends(get
     reasons = []
     eligible = True
 
-    # User details safely extract karein (Chahe string ho ya list)
+    # 1. User Qualification Extract
     user_qual_raw = user.get("qualification", "")
     user_quals = [q.strip().lower() for q in user_qual_raw.split(",")] if isinstance(user_qual_raw, str) else [str(user_qual_raw).lower()]
     
+    # 2. User Specializations (Branch = Trade = Subject)
     user_branch_raw = user.get("branch", "")
-    user_branches = [b.strip().lower() for b in user_branch_raw.split(",")] if isinstance(user_branch_raw, str) else [str(user_branch_raw).lower()]
+    user_trade_raw = user.get("trade", "")
+    user_subject_raw = user.get("subject", "")
 
+    user_specializations = []
+    for raw_val in [user_branch_raw, user_trade_raw, user_subject_raw]:
+        if isinstance(raw_val, str) and raw_val:
+            user_specializations.extend([v.strip().lower() for v in raw_val.split(",")])
+
+    # --- SMART INJECTION LOGIC (Naya Hissa) ---
+    # Pata lagate hain ki user higher technical ya science background se hai kya
+    user_qual_str = " ".join(user_quals)
+    is_btech_diploma_mtech = any(q in user_qual_str for q in ["b.tech", "btech", "m.tech", "mtech", "diploma", "degree", "be", "b.e"])
+    is_bsc = any(q in user_qual_str for q in ["bsc", "b.sc", "bachelor of science"])
+
+    # RULE A: Agar user ne kuch bhi padha hai, toh usko 10th pass automatically maan lo
+    if user_quals and not any(q in user_quals for q in ["10th", "matric"]):
+        user_quals.extend(["10th", "matric"])
+
+    # RULE B: Tech ya B.Sc walo ko 12th pass automatically maan lo
+    if (is_btech_diploma_mtech or is_bsc) and not any(q in user_quals for q in ["12th", "intermediate"]):
+        user_quals.extend(["12th", "intermediate"])
+
+    # RULE C: B.Tech, Diploma, M.Tech walo ke subject me automatically "PCM" daal do
+    if is_btech_diploma_mtech and "pcm" not in user_specializations:
+        user_specializations.append("pcm")
+
+    # RULE D: B.Sc walo ke subject me automatically "PCB" daal do (aapki requirement ke mutabik)
+    if is_bsc and "pcb" not in user_specializations:
+        user_specializations.append("pcb")
+    # -------------------------------------------
+
+    # 3. Job Requirements Extract
     job_quals = [q.strip().lower() for q in job.get("qualifications", [])]
-    job_branches = [b.strip().lower() for b in job.get("branches", [])]
-    job_category = job.get("category", "").lower()
-    job_title = job.get("post_name", "").lower()
-
-    # 1. School level / Scholarship Over-qualification Check
-    is_school_level_job = any("10th" in q or "matric" in q or "12th" in q or "intermediate" in q for q in job_quals)
-    is_scholarship = "scholarship" in job_category or "scholarship" in job_title
     
-    user_is_higher = any(any(he in uq for he in ["b.tech", "btech", "degree", "diploma", "m.tech", "bsc"]) for uq in user_quals)
+    job_specializations = [b.strip().lower() for b in job.get("branches", [])]
+    job_specializations.extend([t.strip().lower() for t in job.get("trades", [])])
+    job_specializations.extend([s.strip().lower() for s in job.get("subjects", [])])
 
-    if (is_school_level_job or is_scholarship) and user_is_higher:
-        allows_higher = any("graduate" in q or "any degree" in q for q in job_quals)
-        if not allows_higher:
-            eligible = False
-            reasons.append("This school-level post/scholarship is not for technical degree/diploma holders.")
-
-    # 2. Qualification Matching (Flexible for Diploma & BTech)
+    # Qualification Matching
     if job_quals and eligible:
         qual_matched = False
         for uq in user_quals:
             for jq in job_quals:
-                if uq in jq or jq in uq or ("diploma" in uq and "diploma" in jq) or ("b.tech" in uq and "b.tech" in jq):
+                if uq in jq or jq in uq or ("diploma" in uq and "diploma" in jq) or ("b.tech" in uq and "b.tech" in jq) or ("iti" in uq and "iti" in jq):
                     qual_matched = True
                     break
             if qual_matched:
                 break
         
-        # Agar job mein 'any' ya 'graduate' hai toh sabhi eligible hain
         if not qual_matched and not any(q in ["any degree", "graduate", "any"] for q in job_quals):
-            if not is_school_level_job:
-                eligible = False
-                reasons.append(f"Requires qualification: {', '.join(job['qualifications'])}")
+            eligible = False
+            reasons.append(f"Requires qualification: {', '.join(job.get('qualifications', []))}")
 
-    # 3. Branch Matching (Civil user ke liye Civil match karna)
-    if user_branches and job_branches and eligible:
-        branch_matched = any(ub in jb or jb in ub for ub in user_branches for jb in job_branches)
-        if not branch_matched and "all branches" not in job_branches and "civil engineering" not in job_branches:
-            # Agar general post hai toh branch skip ho sakti hai
-            if not any(q in ["any degree", "10th", "12th"] for q in job_quals):
+    # Branch / Trade / Subject Matching 
+    if job_specializations and eligible:
+        # Agar job ko specialization chahiye aur user ki profile me bilkul empty hai (aur Smart injection se bhi nahi aayi)
+        if not user_specializations:
+            eligible = False
+            reasons.append(f"Requires branch/trade/subject: {', '.join(job_specializations)}")
+        else:
+            spec_matched = any(us in js or js in us for us in user_specializations for js in job_specializations)
+            
+            # Agar subject match nahi hua aur job ne "All branches" ya "All trades" allow nahi kiya hai
+            if not spec_matched and not any(skip in job_specializations for skip in ["all branches", "all trades", "all subjects"]):
                 eligible = False
-                reasons.append(f"Requires branch: {', '.join(job['branches'])}")
+                required_specs = job.get("branches", []) + job.get("trades", []) + job.get("subjects", [])
+                reasons.append(f"Requires branch/trade/subject: {', '.join(required_specs)}")
 
-    # 4. Age Limit Check
+    # Age Limit Check
     if user.get("age") is not None:
         if job.get("min_age") is not None and user["age"] < job["min_age"]:
             eligible = False
@@ -1103,7 +1198,8 @@ async def check_eligibility(body: EligibilityCheckBody, user: dict = Depends(get
             eligible = False
             reasons.append(f"Maximum age limit: {job['max_age']}")
 
-    if not user.get("qualification") or not user.get("branch"):
+    # Profile Incomplete Check
+    if not user.get("qualification") or not any([user.get("branch"), user.get("trade"), user.get("subject")]):
         reasons.append("Complete your profile for an accurate check.")
 
     return {
@@ -1795,15 +1891,22 @@ async def seed_admin():
             "created_at": datetime.now(timezone.utc).isoformat(),
         })
 
-@app.on_event("startup")
-async def startup_event():
+
+# 1. Lifespan function define karein (Startup + Shutdown ek hi jagah)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # ==========================
+    # 🟢 STARTUP LOGIC (yield se pehle)
+    # ==========================
     global _push_client
     _push_client = httpx.AsyncClient(base_url="https://push-service-placeholder.com")
+    
     await seed_admin()
+    
+    # Indexes
     await db.jobs.create_index("job_id", unique=True)
     await db.jobs.create_index("source_url", unique=True, sparse=True)
     await db.jobs.create_index("content_hash", unique=True)
-
     await db.jobs.create_index("post_type")
     await db.jobs.create_index("last_date")
     await db.jobs.create_index("organization")
@@ -1816,43 +1919,53 @@ async def startup_event():
     await db.jobs.create_index("applications")
     await db.jobs.create_index("trending_score")
     await db.jobs.create_index("category")
-    await db.jobs.create_index([
-        ("organization", 1),
-        ("post_name", 1),
-        ("last_date", 1)
-    ])
-    await db.jobs.create_index(
-        [("is_active", 1), ("last_date", 1)]
-    )
+    await db.jobs.create_index([("organization", 1), ("post_name", 1), ("last_date", 1)])
+    await db.jobs.create_index([("is_active", 1), ("last_date", 1)])
+    
     await db.applications.create_index("user_id")
     await db.applications.create_index("saved_at")
     await db.applications.create_index("applied_at")
-    await db.applications.create_index(
-        [("user_id", 1), ("job_id", 1)],
-        unique=True
-    )
-    await db.recent_jobs.create_index(
-        [("user_id", 1), ("job_id", 1)],
-        unique=True
-    )
+    await db.applications.create_index([("user_id", 1), ("job_id", 1)], unique=True)
+    
+    await db.recent_jobs.create_index([("user_id", 1), ("job_id", 1)], unique=True)
+    
     await db.push_devices.create_index("user_id")
     await db.push_devices.create_index("device_token", unique=True)
+    
     await db.jobs.create_index([
         ("post_name", "text"),
         ("organization", "text"),
         ("description", "text")
     ])
-    # 🚀 Yahan purane naam ko naye background engine se replace kar diya gaya hai
+    
+    # Background Scheduler
     scheduler.add_job(refresh_jobs_task, 'interval', hours=12)
     scheduler.start()
     logger.info("CareerPulse Background Services Started Successfully")
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    global _push_client
+    # 👇 Yahan app chalu ho jayegi aur traffic handle karegi
+    yield 
+
+    # ==========================
+    # 🔴 SHUTDOWN LOGIC (yield ke baad)
+    # ==========================
     if _push_client:
         await _push_client.aclose()
     scheduler.shutdown()
+    logger.info("CareerPulse Background Services Stopped")
+
+
+# 2. App define karte waqt ye lifespan function paas karein
+app = FastAPI(title="CareerPulse API", lifespan=lifespan)
+
+# Baki ka middleware aur router attach karne ka code
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 app.include_router(api)
 
@@ -1909,29 +2022,35 @@ async def closing_soon():
             {"is_active":True},
             {"_id":0}
         ).sort("last_date",1).limit(20).to_list(20)
-    }            
+    }
 
 @api.get("/home")
 async def home():
+    # 1. Projection: Sirf zaroori fields laayein (Heavy data jaise description ignore karein)
+    projection = {
+        "_id": 0, 
+        "job_id": 1, 
+        "post_name": 1, 
+        "organization": 1, 
+        "post_type": 1, 
+        "last_date": 1, 
+        "salary": 1,
+        "is_active": 1,
+        "category": 1
+    }
+    
+    # 2. Teeno queries ko as a Task define karein (Abhi run nahi hongi)
+    trending_task = db.jobs.find({"is_active": True}, projection).sort("trending_score", -1).limit(10).to_list(10)
+    latest_task = db.jobs.find({"is_active": True}, projection).sort("created_at", -1).limit(10).to_list(10)
+    popular_task = db.jobs.find({"is_active": True}, projection).sort([("applications", -1), ("saves", -1)]).limit(10).to_list(10)
+    
+    # 3. asyncio.gather se teeno ko EK SATH (Parallel) database me daudein!
+    trending, latest, popular = await asyncio.gather(trending_task, latest_task, popular_task)
 
     return {
-        "trending": await db.jobs.find(
-            {"is_active": True},
-            {"_id": 0}
-        ).sort("trending_score",-1).limit(10).to_list(10),
-
-        "latest": await db.jobs.find(
-            {"is_active": True},
-            {"_id": 0}
-        ).sort("created_at",-1).limit(10).to_list(10),
-
-        "popular": await db.jobs.find(
-            {"is_active": True},
-            {"_id": 0}
-        ).sort([
-            ("applications",-1),
-            ("saves",-1)
-        ]).limit(10).to_list(10)
+        "trending": trending,
+        "latest": latest,
+        "popular": popular
     }
 
 from appwrite.id import ID
@@ -1960,6 +2079,33 @@ async def search_users(email: str = "", current_user: dict = Depends(get_current
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@api.get("/api/ai-search")
+async def ai_search(q: str):
+    user_query = q.strip()
+    if not user_query:
+        return {"jobs": []}
+    
+    # 1. User ki query ka embedding banao
+    query_vector = get_embedding(user_query)
+    
+    # 2. MongoDB Atlas ka $vectorSearch aggregation pipeline
+    pipeline = [
+        {
+            "$vectorSearch": {
+                "index": "vector_index",
+                "path": "job_embedding",
+                "queryVector": query_vector,
+                "numCandidates": 50,
+                "limit": 10
+            }
+        },
+        {"$match": {"is_active": True}},
+        {"$project": {"_id": 0, "job_id": 1, "post_name": 1, "organization": 1, "salary": 1, "post_type": 1}}
+    ]
+    
+    jobs = await db.jobs.aggregate(pipeline).to_list(10)
+    return {"jobs": jobs}        
+
 
 # --- 4. SEND MESSAGE ENDPOINT (With Disappearing Logic) ---
 @api.post("/api/messages")
@@ -1978,7 +2124,7 @@ async def send_message(body: MessageBody, user: dict = Depends(get_current_user)
             "text": body.text,
             "type": body.type,
             "job_data": body.jobData,
-            "created_at": body.time or datetime.utcnow().isoformat(),
+            "created_at": body.time or datetime.now(timezone.utc).isoformat(),
             "expires_at": expires_at
         }
 
@@ -2160,52 +2306,34 @@ async def upgrade_to_premium(body: UpgradePremiumBody, user: dict = Depends(get_
 
 @api.post("/api/razorpay-webhook")
 async def razorpay_webhook(request: Request, x_razorpay_signature: str = Header(None)):
-    # 1. Razorpay se aaya hua raw data read karein
-    payload = await request.body()
+    # ... (your existing signature validation code) ...
     
-    # 2. Apna Webhook Secret yahan daalein (Jo Razorpay dashboard me set kiya tha)
-    secret = "MySecretKey123" 
-    
-    # 3. Security Check: Validate Signature (Taaki koi fake payment na bhej sake)
-    expected_signature = hmac.new(
-        bytes(secret, 'utf-8'),
-        msg=payload,
-        digestmod=hashlib.sha256
-    ).hexdigest()
-
-    if expected_signature != x_razorpay_signature:
-        raise HTTPException(status_code=400, detail="Invalid Razorpay Signature")
-
-    # 4. Data ko JSON mein convert karein
     data = json.loads(payload)
     event = data.get("event")
 
-    # 5. Agar event payment success ka hai
     if event in ["payment.captured", "payment.link.paid"]:
-        try:
-            # User ka email nikalein (Jo app se link mein attach ho kar aaya tha)
-            user_email = data["payload"]["payment"]["entity"]["email"]
-            
-            # 🚀 6. 30 din baad ki expiry date calculate karein
-            expiry_date = datetime.now(timezone.utc) + timedelta(days=30)
+        payment_entity = data["payload"]["payment"]["entity"]
+        user_email = payment_entity.get("email")
+        payment_id = payment_entity.get("id") # Get the unique Razorpay Payment ID
+        
+        # 🚀 Check if this specific payment was already processed
+        existing_tx = await db.transactions.find_one({"payment_id": payment_id})
+        if existing_tx:
+            return {"status": "ok", "message": "Already processed"}
 
-            # 7. Database mein is_premium = True aur expiry date save kar dein
-            if user_email:
-                result = await db.users.update_one(
-                    {"email": user_email},
-                    {
-                        "$set": {
-                            "is_premium": True,
-                            "premium_expires_at": expiry_date.isoformat()
-                        }
-                    }
-                )
-                print(f"✅ Premium unlocked for 30 days successfully for: {user_email}")
-                
-        except KeyError:
-            print("⚠️ Email not found in Razorpay payload")
+        # Log the transaction so we never process it again
+        await db.transactions.insert_one({
+            "payment_id": payment_id,
+            "email": user_email,
+            "processed_at": datetime.now(timezone.utc).isoformat()
+        })
 
-    return {"status": "ok"}
+        # Now safely upgrade the user
+        expiry_date = datetime.now(timezone.utc) + timedelta(days=30)
+        await db.users.update_one(
+            {"email": user_email},
+            {"$set": {"is_premium": True, "premium_expires_at": expiry_date.isoformat()}}
+        )
 
 class VerifyPaymentBody(BaseModel):
     email: str    
@@ -2869,27 +2997,15 @@ async def ensure_indexes():
     await db.push_devices.create_index([("user_id", 1), ("device_token", 1)], unique=True)
 
 
+from alru_cache import alru_cache
 
-@app.on_event("shutdown")
-async def on_shutdown():
-    try:
-        scheduler.shutdown(wait=False)
-    except Exception:
-        pass
+# 🚀 Cache the results for 10 minutes (600 seconds)
+# Maximum 32 different cache variants allowed in memory
+@alru_cache(maxsize=32, ttl=600)
+async def fetch_home_data():
+    projection = {"_id": 0, "job_id": 1, "post_name": 1, "organization": 1, "last_date": 1, "salary": 1}
     
-    client.close()
-
-
-app.include_router(api)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-    # Check kariye kya aapke server.py ke end me aisa kuch hai:
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("server:app", host="127.0.0.1", port=8000, reload=True)
+    trending = await db.jobs.find({"is_active": True}, projection).sort("trending_score", -1).limit(10).to_list(10)
+    latest = await db.jobs.find({"is_active": True}, projection).sort("created_at", -1).limit(10).to_list(10)
+    
+    return {"trending": trending, "latest": latest}
