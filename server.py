@@ -2155,7 +2155,7 @@ from appwrite.query import Query
 # 1. MESSAGE SEND KARNE KE LIYE
 from datetime import datetime, timedelta
 
-@api.get("/api/users/search")
+@api.get("/users/search")
 async def search_users(email: str = "", current_user: dict = Depends(get_current_user)):
     try:
         email_query = email.strip().lower()
@@ -2392,7 +2392,7 @@ async def upgrade_to_premium(body: UpgradePremiumBody, user: dict = Depends(get_
     return {"message": "Welcome to Premium!", "is_premium": True, "expires_at": expiry_date.isoformat()}
 
 
-@api.post("/api/razorpay-webhook")
+@api.post("/razorpay-webhook")
 async def razorpay_webhook(request: Request, x_razorpay_signature: str = Header(None)):
     # ... (your existing signature validation code) ...
     
