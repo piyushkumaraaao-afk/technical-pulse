@@ -1,6 +1,5 @@
 """CareerPulse Backend - Job alert app for Diploma/BTech Indian engineering students."""
 import os
-import redis
 import uuid
 import logging
 import asyncio
@@ -16,10 +15,10 @@ from collections import defaultdict
 from bs4 import BeautifulSoup
 from pathlib import Path
 from datetime import datetime, timedelta, timezone, date
-from typing import List, Optional, Literal, Any, Dict, Set
+from typing import List, Optional, Literal, Any, Dict
 from fastapi.security import HTTPBearer
 from fastapi import FastAPI, Request, UploadFile, File, Depends, HTTPException, Header
-from fastapi import Query, WebSocket, WebSocketDisconnect
+from fastapi import Query
 from io import BytesIO
 import random
 import re
@@ -29,8 +28,6 @@ from fastapi import BackgroundTasks, APIRouter
 from pymongo.errors import DuplicateKeyError
 from bson import ObjectId
 from contextlib import asynccontextmanager
-from tenacity import retry, stop_after_attempt, wait_exponential
-from sentence_transformers import SentenceTransformer
 
 import jwt
 import bcrypt
@@ -85,7 +82,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app = FastAPI()
+api = APIRouter(prefix="/api")
 
 razorpay_client = razorpay.Client(
     auth=(
@@ -137,7 +134,18 @@ class ProfileUpdateBody(BaseModel):
     state: Optional[str] = None
     age: Optional[int] = None
     avatar: Optional[str] = None
-  
+
+class MessageBody(BaseModel):
+    receiver_id: str
+    text: str
+    type: Optional[str] = "text"
+    jobData: Optional[dict] = None
+    disappearing_hours: Optional[int] = 0
+    time: Optional[str] = None
+
+class EditMessageBody(BaseModel):
+    message_id: str
+    new_text: str  
 
 class JobBody(BaseModel):
     organization: str
@@ -216,6 +224,8 @@ class AdminNotifyBody(BaseModel):
 class FeedbackBody(BaseModel):
     message: str
 
+class UpgradePremiumBody(BaseModel):
+    payment_id: str
 
 class AdSlot(BaseModel):
     id: str
@@ -224,71 +234,6 @@ class AdSlot(BaseModel):
 
 class AdsPayload(BaseModel):
     ads: List[AdSlot]
-
-# --- WebSocket Connection Manager ---
-class ConnectionManager:
-    def __init__(self):
-        # Active connections: { user_id: Set[WebSocket] } (Ek user multi-device login ho toh sabko jaye)
-        self.active_connections: Dict[str, Set[WebSocket]] = {}
-
-    async def connect(self, user_id: str, websocket: WebSocket):
-        await websocket.accept()
-        if user_id not in self.active_connections:
-            self.active_connections[user_id] = set()
-        self.active_connections[user_id].add(websocket)
-
-    def disconnect(self, user_id: str, websocket: WebSocket):
-        if user_id in self.active_connections:
-            self.active_connections[user_id].discard(websocket)
-            if not self.active_connections[user_id]:
-                del self.active_connections[user_id]
-
-    async def send_personal_message(self, message: dict, user_id: str):
-        if user_id in self.active_connections:
-            for connection in self.active_connections[user_id]:
-                try:
-                    await connection.send_json(message)
-                except Exception:
-                    pass
-
-    async def broadcast_to_all(self, message: dict):
-        """ Sabhi online users ko live alert (jaise new trending job) bhejne ke liye """
-        for user_id, sockets in list(self.active_connections.items()):
-            for socket in sockets:
-                try:
-                    await socket.send_json(message)
-                except Exception:
-                    pass
-
-manager = ConnectionManager()
-
-class FriendBody(BaseModel):
-    friend_id: str
-
-class MessageBody(BaseModel):
-    receiver_id: str
-    text: str
-    type: str = "text"
-    jobData: dict = None
-    time: str = None
-    disappearing_hours: int = 0
-
-class DeleteMessagesBody(BaseModel):
-    message_ids: List[str]
-    delete_type: str # "for_me" or "for_everyone"
-
-class EditMessageBody(BaseModel):
-    message_id: str
-    new_text: str
-
-class DeleteChatBody(BaseModel):
-    texts: List[str]    
-
-class UpgradePremiumBody(BaseModel):
-    pass # Add fields if necessary
-
-class VerifyPaymentBody(BaseModel):
-    email: str
 
 
 # =======================
@@ -434,43 +379,17 @@ def fallback_qualifications(title: str, summary: str, qualifications: list) -> l
         return qualifications
     text = f"{title} {summary}".lower()
     found = []
-    
-    # 🚀 Yahan humne saari nayi degrees add kar di hain
-    mapping = (
-        ("10th", "10th"), ("matric", "10th"), 
-        ("12th", "12th"), ("intermediate", "12th"), 
-        ("iti", "ITI"), 
-        ("diploma", "Diploma"), 
-        ("graduate", "Graduate"), ("degree", "Graduate"),
-        ("b.tech", "B.Tech"), ("btech", "B.Tech"), ("be", "B.Tech"), 
-        ("m.tech", "M.Tech"), ("mtech", "M.Tech"), ("me", "M.Tech"),
-        ("b.sc", "B.Sc"), ("bsc", "B.Sc"),
-        ("m.sc", "M.Sc"), ("msc", "M.Sc")
-    )
-    
-    for phrase, label in mapping:
-        if phrase in text and label not in found: 
-            found.append(label)
-            
+    for phrase, label in (("12th", "12th"), ("intermediate", "12th"), ("iti", "ITI"), ("10th", "10th"), ("diploma", "Diploma"), ("graduate", "Graduate"), ("b.tech", "B.Tech"), ("btech", "B.Tech"), ("be", "B.Tech"), ("b.sc", "B.Sc"), ("bsc", "B.Sc")):
+        if phrase in text and label not in found: found.append(label)
     return found or ["Not Specified"]
 
-
-# Global variable ko None rakhein shuru mein
-_ml_model = None
-
-def get_embedding_model():
-    global _ml_model
-    if _ml_model is None:
-        # Model sirf pehli search query par load hoga, server start hote waqt nahi!
-        _ml_model = SentenceTransformer('all-MiniLM-L6-v2')
-    return _ml_model
-
-def get_embedding(text: str) -> list:
-    if not text:
-        return []
-    model = get_embedding_model()
-    embedding = model.encode(text)
-    return embedding.tolist()        
+def generate_content_hash(
+    organization: str,
+    post_name: str,
+    last_date: str
+) -> str:
+    text = f"{organization}|{post_name}|{last_date}"
+    return hashlib.sha256(text.lower().encode()).hexdigest()    
 
 
 # =======================
@@ -776,7 +695,6 @@ async def refresh_jobs_task() -> None:
                         "admit_card_link": details.get("admit_card_link"),
                         "answer_key_link": details.get("answer_key_link"),
                         "result_link": details.get("result_link"),
-                        "job_embedding": get_embedding(f"{details.get('post_name')} {details.get('organization')} {details.get('eligibility')}"),
                         "views": 0,
                         "saves": 0,
                         "applications": 0,
@@ -816,13 +734,6 @@ async def refresh_jobs_task() -> None:
                     continue
 
     print(f"✅ Scraping cycle finished! +{added} added, {removed} expired")
-
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
-async def safe_groq_call(payload, headers):
-    async with httpx.AsyncClient(timeout=45.0) as ai_client:
-        resp = await ai_client.post(GROQ_URL, headers=headers, json=payload)
-        resp.raise_for_status()
-        return resp.json()    
 
 
 # =======================
@@ -866,7 +777,7 @@ async def admin_list_users(admin: dict = Depends(require_admin)):
 
 
 # --- Auth Endpoints ---
-@app.post("/api/auth/register")
+@api.post("/auth/register")
 async def register(body: RegisterBody):
     existing = await db.users.find_one({"email": body.email.lower()})
     if existing:
@@ -897,7 +808,7 @@ async def register(body: RegisterBody):
     return {"access_token": token, "token_type": "bearer", "user": user_public}
 
 
-@app.post("/api/auth/login")
+@api.post("/auth/login")
 async def login(body: LoginBody):
     user = await db.users.find_one({"email": body.email.lower()})
     if not user or not user.get("password_hash") or not verify_password(body.password, user["password_hash"]):
@@ -1139,43 +1050,9 @@ async def get_job(job_id: str, user: dict = Depends(get_current_user)):
         )
     return {"job": job}
 
-@api.get("/jobs/by-qualifications")
-async def jobs_by_qualifications():
-    # Jin qualifications ki list aapko frontend par dikhani hai
-    target_quals = ["10th", "12th", "ITI", "Diploma", "B.Tech", "B.Sc", "M.Tech", "Graduate"]
-    results = {}
-    
-    # Data chota rakhne ke liye projection
-    projection = {
-        "_id": 0, 
-        "job_id": 1, 
-        "post_name": 1, 
-        "organization": 1, 
-        "last_date": 1, 
-        "qualifications": 1
-    }
-    
-    tasks = []
-    
-    # Har qualification ke liye task banayenge (parallel run ke liye)
-    for qual in target_quals:
-        tasks.append(
-            db.jobs.find(
-                {"is_active": True, "qualifications": qual},
-                projection
-            ).sort("created_at", -1).limit(10).to_list(10) # Har category ki top 10 jobs
-        )
-    
-    # Sabko ek saath fetch karenge (Super Fast!)
-    fetched_jobs = await asyncio.gather(*tasks)
-    
-    # Dictionary mein map kar denge
-    for qual, jobs in zip(target_quals, fetched_jobs):
-        results[qual] = jobs
-        
-    return results
 
-
+from fastapi import APIRouter, Depends, HTTPException
+# Aapke imports as usual yahan rahenge...
 
 @api.post("/jobs/check-eligibility")
 async def check_eligibility(body: EligibilityCheckBody, user: dict = Depends(get_current_user)):
@@ -1659,7 +1536,6 @@ async def create_admin_job(
 
     try:
         await db.jobs.insert_one(new_post)
-        redis_client.delete("careerpulse_home_cache")
         return {"message": "Post created successfully"}
     except DuplicateKeyError:
         raise HTTPException(status_code=400, detail="This job post already exists in the database.")
@@ -1670,41 +1546,30 @@ async def create_admin_job(
 @api.patch("/admin/jobs/{job_id}")
 async def update_job_status(job_id: str, request: Request, admin: dict = Depends(require_admin)):
     data = await request.json()
-    update_data = {}
     
-    # 1. Jo field aayi hai, sirf wahi update hogi
+    update_data = {}
     if "is_trending" in data:
         update_data["is_trending"] = data["is_trending"]
     if "is_active" in data:
         update_data["is_active"] = data["is_active"]
         
-    # 2. Smart Query (jo 'job_id' aur MongoDB ki '_id' dono pakad legi)
     query = {"$or": [{"job_id": job_id}]}
     if ObjectId.is_valid(job_id):
         query["$or"].append({"_id": ObjectId(job_id)})
 
-    # 3. Database mein update karein
     result = await db.jobs.update_one(query, {"$set": update_data})
     
-    # 4. Error Handling: Agar job mili hi nahi toh error de do
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Job not found")
         
-    # 5. Live Broadcast Logic (Agar isko specifically 'Trending' mark kiya gaya hai)
-    if data.get("is_trending") is True:
-        job_info = await db.jobs.find_one(query, {"_id": 0})
-        if job_info:
-            # WebSocket ke zariye sabhi online users ko live popup bhejein
-            alert_message = {
-                "type": "live_alert",
-                "title": "🔥 Trending Job Alert!",
-                "message": job_info.get("post_name", "New Job available"),
-                "job_data": job_info
-            }
-            # Note: Make sure 'manager' (WebSocket Manager) is accessible here
-            await manager.broadcast_to_all(alert_message)
-            
-    return {"success": True, "message": "Job status updated and broadcasted successfully"}
+    return {"success": True, "message": "Job status updated successfully"}
+
+
+# 2. User ko Premium aur Block karne ke liye API
+from bson import ObjectId
+
+from datetime import datetime, timedelta, timezone
+from bson import ObjectId
 
 @api.patch("/admin/users/{user_id}")
 async def update_user_status(user_id: str, request: Request, admin: dict = Depends(require_admin)):
@@ -1752,8 +1617,7 @@ async def admin_update_job(job_id: str, request: Request, admin: dict = Depends(
     result = await db.jobs.update_one(query, {"$set": data})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Job not found")
-
-    redis_client.delete("careerpulse_home_cache")    
+        
     updated = await db.jobs.find_one(query, {"_id": 0})
     return {"job": updated}
 
@@ -1761,7 +1625,6 @@ async def admin_update_job(job_id: str, request: Request, admin: dict = Depends(
 @api.delete("/admin/jobs/{job_id}")
 async def admin_delete_job(job_id: str, admin: dict = Depends(require_admin)):
     await db.jobs.delete_one({"job_id": job_id})
-    redis_client.delete("careerpulse_home_cache")
     return {"ok": True}
 
 
@@ -2107,47 +1970,30 @@ async def closing_soon():
             {"is_active":True},
             {"_id":0}
         ).sort("last_date",1).limit(20).to_list(20)
-    }
+    }            
 
-
-
-# 1. Redis Connection (Agar local par hai toh localhost, ya cloud URL)
-REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
-redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
-
-# 2. Optimized /home Endpoint with Redis Cache
-@app.get("/api/home")
+@api.get("/home")
 async def home():
-    cache_key = "careerpulse_home_cache"
-    
-    # Step A: Check karein ki data Redis mein pehle se hai ya nahi
-    cached_data = redis_client.get(cache_key)
-    if cached_data:
-        # Agar cache mil gaya, toh database ko touch kiye bina turant return kar do! (Ultra Fast 🚀)
-        return json.loads(cached_data)
 
-    # Step B: Agar cache mein nahi hai, toh MongoDB se fetch karo
-    projection = {
-        "_id": 0, "job_id": 1, "post_name": 1, "organization": 1, 
-        "post_type": 1, "last_date": 1, "salary": 1, "is_active": 1, "category": 1
+    return {
+        "trending": await db.jobs.find(
+            {"is_active": True},
+            {"_id": 0}
+        ).sort("trending_score",-1).limit(10).to_list(10),
+
+        "latest": await db.jobs.find(
+            {"is_active": True},
+            {"_id": 0}
+        ).sort("created_at",-1).limit(10).to_list(10),
+
+        "popular": await db.jobs.find(
+            {"is_active": True},
+            {"_id": 0}
+        ).sort([
+            ("applications",-1),
+            ("saves",-1)
+        ]).limit(10).to_list(10)
     }
-    
-    trending_task = db.jobs.find({"is_active": True}, projection).sort("trending_score", -1).limit(10).to_list(10)
-    latest_task = db.jobs.find({"is_active": True}, projection).sort("created_at", -1).limit(10).to_list(10)
-    popular_task = db.jobs.find({"is_active": True}, projection).sort([("applications", -1), ("saves", -1)]).limit(10).to_list(10)
-    
-    trending, latest, popular = await asyncio.gather(trending_task, latest_task, popular_task)
-
-    response_data = {
-        "trending": trending,
-        "latest": latest,
-        "popular": popular
-    }
-
-    # Step C: Data ko Redis mein save kar dein taaki agli baar fast mile (Expire time: 10 minutes = 600 seconds)
-    redis_client.setex(cache_key, 600, json.dumps(response_data))
-
-    return response_data
 
 from appwrite.id import ID
 from appwrite.query import Query
@@ -2155,7 +2001,7 @@ from appwrite.query import Query
 # 1. MESSAGE SEND KARNE KE LIYE
 from datetime import datetime, timedelta
 
-@app.get("/api/users/search")
+@api.get("/api/users/search")
 async def search_users(email: str = "", current_user: dict = Depends(get_current_user)):
     try:
         email_query = email.strip().lower()
@@ -2175,44 +2021,9 @@ async def search_users(email: str = "", current_user: dict = Depends(get_current
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/ai-search")
-async def ai_search(q: str):
-    user_query = q.strip()
-    if not user_query:
-        return {"jobs": []}
-    
-    try:
-        query_vector = get_embedding(user_query)
-        pipeline = [
-            {
-                "$vectorSearch": {
-                    "index": "vector_index",
-                    "path": "job_embedding",
-                    "queryVector": query_vector,
-                    "numCandidates": 50,
-                    "limit": 10
-                }
-            },
-            {"$match": {"is_active": True}},
-            {"$project": {"_id": 0, "job_id": 1, "post_name": 1, "organization": 1, "salary": 1, "post_type": 1, "location": 1}}
-        ]
-        jobs = await db.jobs.aggregate(pipeline).to_list(10)
-        if jobs:
-            return {"jobs": jobs}
-    except Exception as e:
-        print("Vector search fallback triggered:", e)
-
-    # 🚀 FALLBACK: Agar vector index abhi ready nahi hai, toh smart regex search chal jayegi
-    fallback_jobs = await db.jobs.find(
-        {"is_active": True, "post_name": {"$regex": user_query, "$options": "i"}},
-        {"_id": 0}
-    ).limit(10).to_list(10)
-    
-    return {"jobs": fallback_jobs}        
-
 
 # --- 4. SEND MESSAGE ENDPOINT (With Disappearing Logic) ---
-@app.post("/api/messages")
+@api.post("/api/messages")
 async def send_message(body: MessageBody, user: dict = Depends(get_current_user)):
     try:
         sender_id = user["user_id"]
@@ -2228,7 +2039,7 @@ async def send_message(body: MessageBody, user: dict = Depends(get_current_user)
             "text": body.text,
             "type": body.type,
             "job_data": body.jobData,
-            "created_at": body.time or datetime.now(timezone.utc).isoformat(),
+            "created_at": body.time or datetime.utcnow().isoformat(),
             "expires_at": expires_at
         }
 
@@ -2245,12 +2056,13 @@ async def send_message(body: MessageBody, user: dict = Depends(get_current_user)
             del message_doc["_id"]
 
         return message_doc
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 # --- 5. GET CHAT MESSAGES BETWEEN TWO USERS ---
-@app.get("/api/messages/{other_user_id}")
+@api.get("/api/messages/{other_user_id}")
 async def get_chat_messages(other_user_id: str, current_user: dict = Depends(get_current_user)):
     try:
         my_id = current_user["user_id"]
@@ -2269,40 +2081,52 @@ async def get_chat_messages(other_user_id: str, current_user: dict = Depends(get
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    
+class DeleteMessagesBody(BaseModel):
+    message_ids: List[str]
+    delete_type: str # "for_me" (Clear Chat) ya "for_everyone" (Remove)
+
+class FriendBody(BaseModel):
+    friend_id: str
+
+class DeleteChatBody(BaseModel):
+    texts: List[str]    
 
 # ==========================================
 # 1. ADD / REMOVE FRIEND ENDPOINTS
 # ==========================================
-@app.post("/api/friends/add")
+@api.post("/api/friends/add")
 async def add_friend(body: FriendBody, user: dict = Depends(get_current_user)):
     my_id = user["user_id"]
     friend_id = body.friend_id
     
+    # Dono users ke 'friends' array mein ek dusre ko add karo
     await db.users.update_one({"user_id": my_id}, {"$addToSet": {"friends": friend_id}})
     await db.users.update_one({"user_id": friend_id}, {"$addToSet": {"friends": my_id}})
     
     return {"message": "Friend added successfully"}
 
-@app.post("/api/friends/remove")
+@api.post("/api/friends/remove")
 async def remove_friend(body: FriendBody, user: dict = Depends(get_current_user)):
     my_id = user["user_id"]
     friend_id = body.friend_id
     
+    # Dono users ke 'friends' array se ek dusre ko remove karo
     await db.users.update_one({"user_id": my_id}, {"$pull": {"friends": friend_id}})
     await db.users.update_one({"user_id": friend_id}, {"$pull": {"friends": my_id}})
     
     return {"message": "Friend removed successfully"}
 
-@app.get("/api/friends")
+@api.get("/api/friends")
 async def get_friends(user: dict = Depends(get_current_user)):
     my_id = user["user_id"]
+    # User ka document nikalo
     me = await db.users.find_one({"user_id": my_id})
     friend_ids = me.get("friends", [])
     
     if not friend_ids:
         return []
         
+    # Un sabhi doston ka data fetch karo
     cursor = db.users.find({"user_id": {"$in": friend_ids}}, {"_id": 0, "password_hash": 0})
     friends_list = await cursor.to_list(length=100)
     return friends_list
@@ -2310,7 +2134,7 @@ async def get_friends(user: dict = Depends(get_current_user)):
 # ==========================================
 # 2. DELETE MESSAGES (For Me / For Everyone)
 # ==========================================
-@app.post("/api/messages/delete")
+@api.post("/api/messages/delete")
 async def delete_messages(body: DeleteMessagesBody, user: dict = Depends(get_current_user)):
     my_id = user["user_id"]
     
@@ -2351,7 +2175,7 @@ async def delete_messages(body: DeleteMessagesBody, user: dict = Depends(get_cur
 
     return {"message": "Invalid operation"}
 
-@app.put("/api/messages/edit")
+@api.put("/api/messages/edit")
 async def edit_message(body: EditMessageBody, user: dict = Depends(get_current_user)):
     my_id = user["user_id"]
     
@@ -2375,9 +2199,11 @@ async def edit_message(body: EditMessageBody, user: dict = Depends(get_current_u
 
 from datetime import datetime, timedelta, timezone
 
-@api.post("/users/upgrade")
+@api.post("/api/users/upgrade")
 async def upgrade_to_premium(body: UpgradePremiumBody, user: dict = Depends(get_current_user)):
     my_id = user["user_id"]
+    
+    # 🚀 Aaj se 30 din baad ki expiry date set kar rahe hain
     expiry_date = datetime.now(timezone.utc) + timedelta(days=30)
     
     result = await db.users.update_one(
@@ -2389,40 +2215,61 @@ async def upgrade_to_premium(body: UpgradePremiumBody, user: dict = Depends(get_
             }
         }
     )
+    
     return {"message": "Welcome to Premium!", "is_premium": True, "expires_at": expiry_date.isoformat()}
 
 
-@api.post("/razorpay-webhook")
+@api.post("/api/razorpay-webhook")
 async def razorpay_webhook(request: Request, x_razorpay_signature: str = Header(None)):
-    # ... (your existing signature validation code) ...
+    # 1. Razorpay se aaya hua raw data read karein
+    payload = await request.body()
     
+    # 2. Apna Webhook Secret yahan daalein (Jo Razorpay dashboard me set kiya tha)
+    secret = "MySecretKey123" 
+    
+    # 3. Security Check: Validate Signature (Taaki koi fake payment na bhej sake)
+    expected_signature = hmac.new(
+        bytes(secret, 'utf-8'),
+        msg=payload,
+        digestmod=hashlib.sha256
+    ).hexdigest()
+
+    if expected_signature != x_razorpay_signature:
+        raise HTTPException(status_code=400, detail="Invalid Razorpay Signature")
+
+    # 4. Data ko JSON mein convert karein
     data = json.loads(payload)
     event = data.get("event")
 
+    # 5. Agar event payment success ka hai
     if event in ["payment.captured", "payment.link.paid"]:
-        payment_entity = data["payload"]["payment"]["entity"]
-        user_email = payment_entity.get("email")
-        payment_id = payment_entity.get("id") # Get the unique Razorpay Payment ID
-        
-        # 🚀 Check if this specific payment was already processed
-        existing_tx = await db.transactions.find_one({"payment_id": payment_id})
-        if existing_tx:
-            return {"status": "ok", "message": "Already processed"}
+        try:
+            # User ka email nikalein (Jo app se link mein attach ho kar aaya tha)
+            user_email = data["payload"]["payment"]["entity"]["email"]
+            
+            # 🚀 6. 30 din baad ki expiry date calculate karein
+            expiry_date = datetime.now(timezone.utc) + timedelta(days=30)
 
-        # Log the transaction so we never process it again
-        await db.transactions.insert_one({
-            "payment_id": payment_id,
-            "email": user_email,
-            "processed_at": datetime.now(timezone.utc).isoformat()
-        })
+            # 7. Database mein is_premium = True aur expiry date save kar dein
+            if user_email:
+                result = await db.users.update_one(
+                    {"email": user_email},
+                    {
+                        "$set": {
+                            "is_premium": True,
+                            "premium_expires_at": expiry_date.isoformat()
+                        }
+                    }
+                )
+                print(f"✅ Premium unlocked for 30 days successfully for: {user_email}")
+                
+        except KeyError:
+            print("⚠️ Email not found in Razorpay payload")
 
-        # Now safely upgrade the user
-        expiry_date = datetime.now(timezone.utc) + timedelta(days=30)
-        await db.users.update_one(
-            {"email": user_email},
-            {"$set": {"is_premium": True, "premium_expires_at": expiry_date.isoformat()}}
-        )
-   
+    return {"status": "ok"}
+
+class VerifyPaymentBody(BaseModel):
+    email: str    
 
 @api.post("/verify-payment")
 async def verify_payment(body: VerifyPaymentBody, user: dict = Depends(get_current_user)):
@@ -2446,7 +2293,7 @@ async def verify_payment(body: VerifyPaymentBody, user: dict = Depends(get_curre
             "message": "Payment not received yet. Please wait a minute or refresh."
         }
 
-@api.get("/jobs/for-you")
+@api.get("/api/jobs/for-you")
 async def for_you(user: dict = Depends(get_current_user)):
     try:
         user_branch = user.get("branch", [])
@@ -2535,58 +2382,7 @@ async def delete_ai_chat(body: DeleteChatBody, user: dict = Depends(get_current_
             {"assistant_message": {"$in": body.texts}}
         ]
     })
-    return {"ok": True}
-
-@app.websocket("/ws/{user_id}")
-async def websocket_endpoint(websocket: WebSocket, user_id: str):
-    await manager.connect(user_id, websocket)
-    try:
-        while True:
-            # Frontend se real-time data receive karna (Message ya Typing status)
-            data = await websocket.receive_json()
-            event_type = data.get("type") # "chat_message" ya "typing"
-            
-            if event_type == "chat_message":
-                receiver_id = data.get("receiver_id")
-                text = data.get("text")
-                job_data = data.get("job_data", None)
-                
-                # Database mein message save karein
-                message_doc = {
-                    "sender_id": user_id,
-                    "receiver_id": receiver_id,
-                    "text": text,
-                    "type": "text" if not job_data else "job",
-                    "job_data": job_data,
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                    "deleted_for": []
-                }
-                
-                result = await db.messages.insert_one(message_doc)
-                msg_id = str(result.inserted_id)
-                message_doc["id"] = msg_id
-                if "_id" in message_doc:
-                    del message_doc["_id"]
-
-                # 🚀 WHATSAPP STYLE: Agar user khud ko message kar raha hai (Self-Chat)
-                if user_id == receiver_id:
-                    await manager.send_personal_message(message_doc, user_id)
-                else:
-                    # Receiver ko message bhejo
-                    await manager.send_personal_message(message_doc, receiver_id)
-                    # Sender ko bhi echo bhejo taaki uski screen par bina refresh ke tick/message dikh jaye
-                    await manager.send_personal_message(message_doc, user_id)
-
-            elif event_type == "typing":
-                receiver_id = data.get("receiver_id")
-                if receiver_id and receiver_id != user_id:
-                    await manager.send_personal_message({
-                        "type": "typing",
-                        "sender_id": user_id
-                    }, receiver_id)
-
-    except WebSocketDisconnect:
-        manager.disconnect(user_id, websocket)                                                                           
+    return {"ok": True}                                                                       
 
 
 SAMPLE_JOBS = [
@@ -3134,25 +2930,27 @@ async def ensure_indexes():
     await db.push_devices.create_index([("user_id", 1), ("device_token", 1)], unique=True)
 
 
-@api.post("/admin/generate-embeddings")
-async def generate_embeddings_for_old_jobs(admin: dict = Depends(require_admin)):
-    # Jin jobs mein embedding nahi hai unhe uthao
-    cursor = db.jobs.find({"job_embedding": {"$exists": False}, "is_active": True})
-    count = 0
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    try:
+        scheduler.shutdown(wait=False)
+    except Exception:
+        pass
     
-    async for job in cursor:
-        # Job ke text (Title + Organization + Description) ko mila kar embedding banayein
-        combined_text = f"{job.get('post_name', '')} {job.get('organization', '')} {job.get('description', '')}"
-        vector = get_embedding(combined_text)
-        
-        if vector:
-            await db.jobs.update_one(
-                {"job_id": job["job_id"]},
-                {"$set": {"job_embedding": vector}}
-            )
-            count += 1
-            
-    return {"success": True, "message": f"Embeddings generated successfully for {count} jobs!"}
+    client.close()
 
 
-    app.include_router(api)
+app.include_router(api)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+    # Check kariye kya aapke server.py ke end me aisa kuch hai:
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("server:app", host="127.0.0.1", port=8000, reload=True)
