@@ -1,5 +1,6 @@
 """CareerPulse Backend - Job alert app for Diploma/BTech Indian engineering students."""
 import os
+import redis
 import uuid
 import logging
 import asyncio
@@ -15,8 +16,8 @@ from collections import defaultdict
 from bs4 import BeautifulSoup
 from pathlib import Path
 from datetime import datetime, timedelta, timezone, date
-from typing import List, Optional, Literal, Any, Dict
-from fastapi.security import HTTPBearer
+from typing import List, Optional, Literal, Any, Dict, Set
+from fastapi.security import HTTPBearer,WebSocket, WebSocketDisconnect
 from fastapi import FastAPI, Request, UploadFile, File, Depends, HTTPException, Header
 from fastapi import Query
 from io import BytesIO
@@ -236,6 +237,43 @@ class AdSlot(BaseModel):
 
 class AdsPayload(BaseModel):
     ads: List[AdSlot]
+
+# --- WebSocket Connection Manager ---
+class ConnectionManager:
+    def __init__(self):
+        # Active connections: { user_id: Set[WebSocket] } (Ek user multi-device login ho toh sabko jaye)
+        self.active_connections: Dict[str, Set[WebSocket]] = {}
+
+    async def connect(self, user_id: str, websocket: WebSocket):
+        await websocket.accept()
+        if user_id not in self.active_connections:
+            self.active_connections[user_id] = set()
+        self.active_connections[user_id].add(websocket)
+
+    def disconnect(self, user_id: str, websocket: WebSocket):
+        if user_id in self.active_connections:
+            self.active_connections[user_id].discard(websocket)
+            if not self.active_connections[user_id]:
+                del self.active_connections[user_id]
+
+    async def send_personal_message(self, message: dict, user_id: str):
+        if user_id in self.active_connections:
+            for connection in self.active_connections[user_id]:
+                try:
+                    await connection.send_json(message)
+                except Exception:
+                    pass
+
+    async def broadcast_to_all(self, message: dict):
+        """ Sabhi online users ko live alert (jaise new trending job) bhejne ke liye """
+        for user_id, sockets in list(self.active_connections.items()):
+            for socket in sockets:
+                try:
+                    await socket.send_json(message)
+                except Exception:
+                    pass
+
+manager = ConnectionManager()    
 
 
 # =======================
@@ -723,6 +761,7 @@ async def refresh_jobs_task() -> None:
                         "admit_card_link": details.get("admit_card_link"),
                         "answer_key_link": details.get("answer_key_link"),
                         "result_link": details.get("result_link"),
+                        "job_embedding": get_embedding(f"{details.get('post_name')} {details.get('organization')} {details.get('eligibility')}"),
                         "views": 0,
                         "saves": 0,
                         "applications": 0,
@@ -1605,6 +1644,7 @@ async def create_admin_job(
 
     try:
         await db.jobs.insert_one(new_post)
+        redis_client.delete("careerpulse_home_cache")
         return {"message": "Post created successfully"}
     except DuplicateKeyError:
         raise HTTPException(status_code=400, detail="This job post already exists in the database.")
@@ -1615,30 +1655,41 @@ async def create_admin_job(
 @api.patch("/admin/jobs/{job_id}")
 async def update_job_status(job_id: str, request: Request, admin: dict = Depends(require_admin)):
     data = await request.json()
-    
     update_data = {}
+    
+    # 1. Jo field aayi hai, sirf wahi update hogi
     if "is_trending" in data:
         update_data["is_trending"] = data["is_trending"]
     if "is_active" in data:
         update_data["is_active"] = data["is_active"]
         
+    # 2. Smart Query (jo 'job_id' aur MongoDB ki '_id' dono pakad legi)
     query = {"$or": [{"job_id": job_id}]}
     if ObjectId.is_valid(job_id):
         query["$or"].append({"_id": ObjectId(job_id)})
 
+    # 3. Database mein update karein
     result = await db.jobs.update_one(query, {"$set": update_data})
     
+    # 4. Error Handling: Agar job mili hi nahi toh error de do
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Job not found")
         
-    return {"success": True, "message": "Job status updated successfully"}
-
-
-# 2. User ko Premium aur Block karne ke liye API
-from bson import ObjectId
-
-from datetime import datetime, timedelta, timezone
-from bson import ObjectId
+    # 5. Live Broadcast Logic (Agar isko specifically 'Trending' mark kiya gaya hai)
+    if data.get("is_trending") is True:
+        job_info = await db.jobs.find_one(query, {"_id": 0})
+        if job_info:
+            # WebSocket ke zariye sabhi online users ko live popup bhejein
+            alert_message = {
+                "type": "live_alert",
+                "title": "🔥 Trending Job Alert!",
+                "message": job_info.get("post_name", "New Job available"),
+                "job_data": job_info
+            }
+            # Note: Make sure 'manager' (WebSocket Manager) is accessible here
+            await manager.broadcast_to_all(alert_message)
+            
+    return {"success": True, "message": "Job status updated and broadcasted successfully"}
 
 @api.patch("/admin/users/{user_id}")
 async def update_user_status(user_id: str, request: Request, admin: dict = Depends(require_admin)):
@@ -1686,7 +1737,8 @@ async def admin_update_job(job_id: str, request: Request, admin: dict = Depends(
     result = await db.jobs.update_one(query, {"$set": data})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Job not found")
-        
+
+    redis_client.delete("careerpulse_home_cache")    
     updated = await db.jobs.find_one(query, {"_id": 0})
     return {"job": updated}
 
@@ -1694,6 +1746,7 @@ async def admin_update_job(job_id: str, request: Request, admin: dict = Depends(
 @api.delete("/admin/jobs/{job_id}")
 async def admin_delete_job(job_id: str, admin: dict = Depends(require_admin)):
     await db.jobs.delete_one({"job_id": job_id})
+    redis_client.delete("careerpulse_home_cache")
     return {"ok": True}
 
 
@@ -2041,34 +2094,45 @@ async def closing_soon():
         ).sort("last_date",1).limit(20).to_list(20)
     }
 
+
+
+# 1. Redis Connection (Agar local par hai toh localhost, ya cloud URL)
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
+redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+
+# 2. Optimized /home Endpoint with Redis Cache
 @api.get("/home")
 async def home():
-    # 1. Projection: Sirf zaroori fields laayein (Heavy data jaise description ignore karein)
+    cache_key = "careerpulse_home_cache"
+    
+    # Step A: Check karein ki data Redis mein pehle se hai ya nahi
+    cached_data = redis_client.get(cache_key)
+    if cached_data:
+        # Agar cache mil gaya, toh database ko touch kiye bina turant return kar do! (Ultra Fast 🚀)
+        return json.loads(cached_data)
+
+    # Step B: Agar cache mein nahi hai, toh MongoDB se fetch karo
     projection = {
-        "_id": 0, 
-        "job_id": 1, 
-        "post_name": 1, 
-        "organization": 1, 
-        "post_type": 1, 
-        "last_date": 1, 
-        "salary": 1,
-        "is_active": 1,
-        "category": 1
+        "_id": 0, "job_id": 1, "post_name": 1, "organization": 1, 
+        "post_type": 1, "last_date": 1, "salary": 1, "is_active": 1, "category": 1
     }
     
-    # 2. Teeno queries ko as a Task define karein (Abhi run nahi hongi)
     trending_task = db.jobs.find({"is_active": True}, projection).sort("trending_score", -1).limit(10).to_list(10)
     latest_task = db.jobs.find({"is_active": True}, projection).sort("created_at", -1).limit(10).to_list(10)
     popular_task = db.jobs.find({"is_active": True}, projection).sort([("applications", -1), ("saves", -1)]).limit(10).to_list(10)
     
-    # 3. asyncio.gather se teeno ko EK SATH (Parallel) database me daudein!
     trending, latest, popular = await asyncio.gather(trending_task, latest_task, popular_task)
 
-    return {
+    response_data = {
         "trending": trending,
         "latest": latest,
         "popular": popular
     }
+
+    # Step C: Data ko Redis mein save kar dein taaki agli baar fast mile (Expire time: 10 minutes = 600 seconds)
+    redis_client.setex(cache_key, 600, json.dumps(response_data))
+
+    return response_data
 
 from appwrite.id import ID
 from appwrite.query import Query
@@ -2102,26 +2166,34 @@ async def ai_search(q: str):
     if not user_query:
         return {"jobs": []}
     
-    # 1. User ki query ka embedding banao
-    query_vector = get_embedding(user_query)
+    try:
+        query_vector = get_embedding(user_query)
+        pipeline = [
+            {
+                "$vectorSearch": {
+                    "index": "vector_index",
+                    "path": "job_embedding",
+                    "queryVector": query_vector,
+                    "numCandidates": 50,
+                    "limit": 10
+                }
+            },
+            {"$match": {"is_active": True}},
+            {"$project": {"_id": 0, "job_id": 1, "post_name": 1, "organization": 1, "salary": 1, "post_type": 1, "location": 1}}
+        ]
+        jobs = await db.jobs.aggregate(pipeline).to_list(10)
+        if jobs:
+            return {"jobs": jobs}
+    except Exception as e:
+        print("Vector search fallback triggered:", e)
+
+    # 🚀 FALLBACK: Agar vector index abhi ready nahi hai, toh smart regex search chal jayegi
+    fallback_jobs = await db.jobs.find(
+        {"is_active": True, "post_name": {"$regex": user_query, "$options": "i"}},
+        {"_id": 0}
+    ).limit(10).to_list(10)
     
-    # 2. MongoDB Atlas ka $vectorSearch aggregation pipeline
-    pipeline = [
-        {
-            "$vectorSearch": {
-                "index": "vector_index",
-                "path": "job_embedding",
-                "queryVector": query_vector,
-                "numCandidates": 50,
-                "limit": 10
-            }
-        },
-        {"$match": {"is_active": True}},
-        {"$project": {"_id": 0, "job_id": 1, "post_name": 1, "organization": 1, "salary": 1, "post_type": 1}}
-    ]
-    
-    jobs = await db.jobs.aggregate(pipeline).to_list(10)
-    return {"jobs": jobs}        
+    return {"jobs": fallback_jobs}        
 
 
 # --- 4. SEND MESSAGE ENDPOINT (With Disappearing Logic) ---
@@ -2466,7 +2538,58 @@ async def delete_ai_chat(body: DeleteChatBody, user: dict = Depends(get_current_
             {"assistant_message": {"$in": body.texts}}
         ]
     })
-    return {"ok": True}                                                                       
+    return {"ok": True}
+
+@app.websocket("/ws/{user_id}")
+async def websocket_endpoint(websocket: WebSocket, user_id: str):
+    await manager.connect(user_id, websocket)
+    try:
+        while True:
+            # Frontend se real-time data receive karna (Message ya Typing status)
+            data = await websocket.receive_json()
+            event_type = data.get("type") # "chat_message" ya "typing"
+            
+            if event_type == "chat_message":
+                receiver_id = data.get("receiver_id")
+                text = data.get("text")
+                job_data = data.get("job_data", None)
+                
+                # Database mein message save karein
+                message_doc = {
+                    "sender_id": user_id,
+                    "receiver_id": receiver_id,
+                    "text": text,
+                    "type": "text" if not job_data else "job",
+                    "job_data": job_data,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "deleted_for": []
+                }
+                
+                result = await db.messages.insert_one(message_doc)
+                msg_id = str(result.inserted_id)
+                message_doc["id"] = msg_id
+                if "_id" in message_doc:
+                    del message_doc["_id"]
+
+                # 🚀 WHATSAPP STYLE: Agar user khud ko message kar raha hai (Self-Chat)
+                if user_id == receiver_id:
+                    await manager.send_personal_message(message_doc, user_id)
+                else:
+                    # Receiver ko message bhejo
+                    await manager.send_personal_message(message_doc, receiver_id)
+                    # Sender ko bhi echo bhejo taaki uski screen par bina refresh ke tick/message dikh jaye
+                    await manager.send_personal_message(message_doc, user_id)
+
+            elif event_type == "typing":
+                receiver_id = data.get("receiver_id")
+                if receiver_id and receiver_id != user_id:
+                    await manager.send_personal_message({
+                        "type": "typing",
+                        "sender_id": user_id
+                    }, receiver_id)
+
+    except WebSocketDisconnect:
+        manager.disconnect(user_id, websocket)                                                                           
 
 
 SAMPLE_JOBS = [
@@ -3014,3 +3137,22 @@ async def ensure_indexes():
     await db.push_devices.create_index([("user_id", 1), ("device_token", 1)], unique=True)
 
 
+@api.post("/admin/generate-embeddings")
+async def generate_embeddings_for_old_jobs(admin: dict = Depends(require_admin)):
+    # Jin jobs mein embedding nahi hai unhe uthao
+    cursor = db.jobs.find({"job_embedding": {"$exists": False}, "is_active": True})
+    count = 0
+    
+    async for job in cursor:
+        # Job ke text (Title + Organization + Description) ko mila kar embedding banayein
+        combined_text = f"{job.get('post_name', '')} {job.get('organization', '')} {job.get('description', '')}"
+        vector = get_embedding(combined_text)
+        
+        if vector:
+            await db.jobs.update_one(
+                {"job_id": job["job_id"]},
+                {"$set": {"job_embedding": vector}}
+            )
+            count += 1
+            
+    return {"success": True, "message": f"Embeddings generated successfully for {count} jobs!"}}
