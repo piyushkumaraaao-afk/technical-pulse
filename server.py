@@ -85,7 +85,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-api = APIRouter()
+app = FastAPI()
+api = APIRouter(prefix="/api")
 
 razorpay_client = razorpay.Client(
     auth=(
@@ -866,7 +867,7 @@ async def admin_list_users(admin: dict = Depends(require_admin)):
 
 
 # --- Auth Endpoints ---
-@api.post("/auth/register")
+@app.post("/api/auth/register")
 async def register(body: RegisterBody):
     existing = await db.users.find_one({"email": body.email.lower()})
     if existing:
@@ -897,7 +898,7 @@ async def register(body: RegisterBody):
     return {"access_token": token, "token_type": "bearer", "user": user_public}
 
 
-@api.post("/auth/login")
+@app.post("/api/auth/login")
 async def login(body: LoginBody):
     user = await db.users.find_one({"email": body.email.lower()})
     if not user or not user.get("password_hash") or not verify_password(body.password, user["password_hash"]):
@@ -2116,7 +2117,7 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
 redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
 
 # 2. Optimized /home Endpoint with Redis Cache
-@api.get("/home")
+@app.get("/api/home")
 async def home():
     cache_key = "careerpulse_home_cache"
     
@@ -3153,3 +3154,6 @@ async def generate_embeddings_for_old_jobs(admin: dict = Depends(require_admin))
             count += 1
             
     return {"success": True, "message": f"Embeddings generated successfully for {count} jobs!"}
+
+
+    app.include_router(api)
