@@ -86,7 +86,6 @@ app.add_middleware(
 )
 
 app = FastAPI()
-api = APIRouter(prefix="/api")
 
 razorpay_client = razorpay.Client(
     auth=(
@@ -2156,7 +2155,7 @@ from appwrite.query import Query
 # 1. MESSAGE SEND KARNE KE LIYE
 from datetime import datetime, timedelta
 
-@api.get("/users/search")
+@app.get("/api/users/search")
 async def search_users(email: str = "", current_user: dict = Depends(get_current_user)):
     try:
         email_query = email.strip().lower()
@@ -2176,7 +2175,7 @@ async def search_users(email: str = "", current_user: dict = Depends(get_current
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@api.get("/ai-search")
+@app.get("/api/ai-search")
 async def ai_search(q: str):
     user_query = q.strip()
     if not user_query:
@@ -2213,7 +2212,7 @@ async def ai_search(q: str):
 
 
 # --- 4. SEND MESSAGE ENDPOINT (With Disappearing Logic) ---
-@api.post("/messages")
+@app.post("/api/messages")
 async def send_message(body: MessageBody, user: dict = Depends(get_current_user)):
     try:
         sender_id = user["user_id"]
@@ -2251,7 +2250,7 @@ async def send_message(body: MessageBody, user: dict = Depends(get_current_user)
 
 
 # --- 5. GET CHAT MESSAGES BETWEEN TWO USERS ---
-@api.get("/messages/{other_user_id}")
+@app.get("/api/messages/{other_user_id}")
 async def get_chat_messages(other_user_id: str, current_user: dict = Depends(get_current_user)):
     try:
         my_id = current_user["user_id"]
@@ -2275,7 +2274,7 @@ async def get_chat_messages(other_user_id: str, current_user: dict = Depends(get
 # ==========================================
 # 1. ADD / REMOVE FRIEND ENDPOINTS
 # ==========================================
-@api.post("/friends/add")
+@app.post("/api/friends/add")
 async def add_friend(body: FriendBody, user: dict = Depends(get_current_user)):
     my_id = user["user_id"]
     friend_id = body.friend_id
@@ -2285,7 +2284,7 @@ async def add_friend(body: FriendBody, user: dict = Depends(get_current_user)):
     
     return {"message": "Friend added successfully"}
 
-@api.post("/friends/remove")
+@app.post("/api/friends/remove")
 async def remove_friend(body: FriendBody, user: dict = Depends(get_current_user)):
     my_id = user["user_id"]
     friend_id = body.friend_id
@@ -2295,7 +2294,7 @@ async def remove_friend(body: FriendBody, user: dict = Depends(get_current_user)
     
     return {"message": "Friend removed successfully"}
 
-@api.get("/friends")
+@app.get("/api/friends")
 async def get_friends(user: dict = Depends(get_current_user)):
     my_id = user["user_id"]
     me = await db.users.find_one({"user_id": my_id})
@@ -2311,7 +2310,7 @@ async def get_friends(user: dict = Depends(get_current_user)):
 # ==========================================
 # 2. DELETE MESSAGES (For Me / For Everyone)
 # ==========================================
-@api.post("/messages/delete")
+@app.post("/api/messages/delete")
 async def delete_messages(body: DeleteMessagesBody, user: dict = Depends(get_current_user)):
     my_id = user["user_id"]
     
@@ -2352,7 +2351,7 @@ async def delete_messages(body: DeleteMessagesBody, user: dict = Depends(get_cur
 
     return {"message": "Invalid operation"}
 
-@api.put("/messages/edit")
+@app.put("/api/messages/edit")
 async def edit_message(body: EditMessageBody, user: dict = Depends(get_current_user)):
     my_id = user["user_id"]
     
