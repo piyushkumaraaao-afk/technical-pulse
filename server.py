@@ -282,11 +282,20 @@ async def require_admin(user: dict = Depends(get_current_user)) -> dict:
     return user
 
 
-model = SentenceTransformer('all-MiniLM-L6-v2')
+
+_ml_model = None
+
+def get_embedding_model():
+    global _ml_model
+    if _ml_model is None:
+        # Model sirf pehli search query par load hoga, server start hote waqt nahi!
+        _ml_model = SentenceTransformer('all-MiniLM-L6-v2')
+    return _ml_model
 
 def get_embedding(text: str) -> list:
     if not text:
         return []
+    model = get_embedding_model()
     embedding = model.encode(text)
     return embedding.tolist()
 
@@ -713,6 +722,7 @@ async def refresh_jobs_task() -> None:
                         "admit_card_link": details.get("admit_card_link"),
                         "answer_key_link": details.get("answer_key_link"),
                         "result_link": details.get("result_link"),
+                        "job_embedding": get_embedding(f"{details.get('post_name')} {details.get('organization')} {details.get('eligibility')}"),
                         "views": 0,
                         "saves": 0,
                         "applications": 0,
@@ -2087,26 +2097,34 @@ async def ai_search(q: str):
     if not user_query:
         return {"jobs": []}
     
-    # 1. User ki query ka embedding banao
-    query_vector = get_embedding(user_query)
+    try:
+        query_vector = get_embedding(user_query)
+        pipeline = [
+            {
+                "$vectorSearch": {
+                    "index": "vector_index",
+                    "path": "job_embedding",
+                    "queryVector": query_vector,
+                    "numCandidates": 50,
+                    "limit": 10
+                }
+            },
+            {"$match": {"is_active": True}},
+            {"$project": {"_id": 0, "job_id": 1, "post_name": 1, "organization": 1, "salary": 1, "post_type": 1, "location": 1}}
+        ]
+        jobs = await db.jobs.aggregate(pipeline).to_list(10)
+        if jobs:
+            return {"jobs": jobs}
+    except Exception as e:
+        print("Vector search fallback triggered:", e)
+
+    # 🚀 FALLBACK: Agar vector index abhi ready nahi hai, toh smart regex search chal jayegi
+    fallback_jobs = await db.jobs.find(
+        {"is_active": True, "post_name": {"$regex": user_query, "$options": "i"}},
+        {"_id": 0}
+    ).limit(10).to_list(10)
     
-    # 2. MongoDB Atlas ka $vectorSearch aggregation pipeline
-    pipeline = [
-        {
-            "$vectorSearch": {
-                "index": "vector_index",
-                "path": "job_embedding",
-                "queryVector": query_vector,
-                "numCandidates": 50,
-                "limit": 10
-            }
-        },
-        {"$match": {"is_active": True}},
-        {"$project": {"_id": 0, "job_id": 1, "post_name": 1, "organization": 1, "salary": 1, "post_type": 1}}
-    ]
-    
-    jobs = await db.jobs.aggregate(pipeline).to_list(10)
-    return {"jobs": jobs}        
+    return {"jobs": fallback_jobs}        
 
 
 # --- 4. SEND MESSAGE ENDPOINT (With Disappearing Logic) ---
