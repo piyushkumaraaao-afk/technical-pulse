@@ -137,18 +137,7 @@ class ProfileUpdateBody(BaseModel):
     state: Optional[str] = None
     age: Optional[int] = None
     avatar: Optional[str] = None
-
-class MessageBody(BaseModel):
-    receiver_id: str
-    text: str
-    type: Optional[str] = "text"
-    jobData: Optional[dict] = None
-    disappearing_hours: Optional[int] = 0
-    time: Optional[str] = None
-
-class EditMessageBody(BaseModel):
-    message_id: str
-    new_text: str  
+  
 
 class JobBody(BaseModel):
     organization: str
@@ -227,8 +216,6 @@ class AdminNotifyBody(BaseModel):
 class FeedbackBody(BaseModel):
     message: str
 
-class UpgradePremiumBody(BaseModel):
-    payment_id: str
 
 class AdSlot(BaseModel):
     id: str
@@ -273,7 +260,35 @@ class ConnectionManager:
                 except Exception:
                     pass
 
-manager = ConnectionManager()    
+manager = ConnectionManager()
+
+class FriendBody(BaseModel):
+    friend_id: str
+
+class MessageBody(BaseModel):
+    receiver_id: str
+    text: str
+    type: str = "text"
+    jobData: dict = None
+    time: str = None
+    disappearing_hours: int = 0
+
+class DeleteMessagesBody(BaseModel):
+    message_ids: List[str]
+    delete_type: str # "for_me" or "for_everyone"
+
+class EditMessageBody(BaseModel):
+    message_id: str
+    new_text: str
+
+class DeleteChatBody(BaseModel):
+    texts: List[str]    
+
+class UpgradePremiumBody(BaseModel):
+    pass # Add fields if necessary
+
+class VerifyPaymentBody(BaseModel):
+    email: str
 
 
 # =======================
@@ -2197,7 +2212,7 @@ async def ai_search(q: str):
 
 
 # --- 4. SEND MESSAGE ENDPOINT (With Disappearing Logic) ---
-@api.post("/api/messages")
+@api.post("/messages")
 async def send_message(body: MessageBody, user: dict = Depends(get_current_user)):
     try:
         sender_id = user["user_id"]
@@ -2235,7 +2250,7 @@ async def send_message(body: MessageBody, user: dict = Depends(get_current_user)
 
 
 # --- 5. GET CHAT MESSAGES BETWEEN TWO USERS ---
-@api.get("/api/messages/{other_user_id}")
+@api.get("/messages/{other_user_id}")
 async def get_chat_messages(other_user_id: str, current_user: dict = Depends(get_current_user)):
     try:
         my_id = current_user["user_id"]
@@ -2254,20 +2269,12 @@ async def get_chat_messages(other_user_id: str, current_user: dict = Depends(get
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-class DeleteMessagesBody(BaseModel):
-    message_ids: List[str]
-    delete_type: str # "for_me" (Clear Chat) ya "for_everyone" (Remove)
-
-class FriendBody(BaseModel):
-    friend_id: str
-
-class DeleteChatBody(BaseModel):
-    texts: List[str]    
+    
 
 # ==========================================
 # 1. ADD / REMOVE FRIEND ENDPOINTS
 # ==========================================
-@api.post("/api/friends/add")
+@api.post("/friends/add")
 async def add_friend(body: FriendBody, user: dict = Depends(get_current_user)):
     my_id = user["user_id"]
     friend_id = body.friend_id
@@ -2277,7 +2284,7 @@ async def add_friend(body: FriendBody, user: dict = Depends(get_current_user)):
     
     return {"message": "Friend added successfully"}
 
-@api.post("/api/friends/remove")
+@api.post("/friends/remove")
 async def remove_friend(body: FriendBody, user: dict = Depends(get_current_user)):
     my_id = user["user_id"]
     friend_id = body.friend_id
@@ -2287,7 +2294,7 @@ async def remove_friend(body: FriendBody, user: dict = Depends(get_current_user)
     
     return {"message": "Friend removed successfully"}
 
-@api.get("/api/friends")
+@api.get("/friends")
 async def get_friends(user: dict = Depends(get_current_user)):
     my_id = user["user_id"]
     me = await db.users.find_one({"user_id": my_id})
@@ -2303,7 +2310,7 @@ async def get_friends(user: dict = Depends(get_current_user)):
 # ==========================================
 # 2. DELETE MESSAGES (For Me / For Everyone)
 # ==========================================
-@api.post("/api/messages/delete")
+@api.post("/messages/delete")
 async def delete_messages(body: DeleteMessagesBody, user: dict = Depends(get_current_user)):
     my_id = user["user_id"]
     
@@ -2344,7 +2351,7 @@ async def delete_messages(body: DeleteMessagesBody, user: dict = Depends(get_cur
 
     return {"message": "Invalid operation"}
 
-@api.put("/api/messages/edit")
+@api.put("/messages/edit")
 async def edit_message(body: EditMessageBody, user: dict = Depends(get_current_user)):
     my_id = user["user_id"]
     
@@ -2368,7 +2375,7 @@ async def edit_message(body: EditMessageBody, user: dict = Depends(get_current_u
 
 from datetime import datetime, timedelta, timezone
 
-@api.post("/api/users/upgrade")
+@api.post("/users/upgrade")
 async def upgrade_to_premium(body: UpgradePremiumBody, user: dict = Depends(get_current_user)):
     my_id = user["user_id"]
     expiry_date = datetime.now(timezone.utc) + timedelta(days=30)
@@ -2385,7 +2392,7 @@ async def upgrade_to_premium(body: UpgradePremiumBody, user: dict = Depends(get_
     return {"message": "Welcome to Premium!", "is_premium": True, "expires_at": expiry_date.isoformat()}
 
 
-@api.post("/razorpay-webhook")
+@api.post("/api/razorpay-webhook")
 async def razorpay_webhook(request: Request, x_razorpay_signature: str = Header(None)):
     # ... (your existing signature validation code) ...
     
@@ -2415,9 +2422,7 @@ async def razorpay_webhook(request: Request, x_razorpay_signature: str = Header(
             {"email": user_email},
             {"$set": {"is_premium": True, "premium_expires_at": expiry_date.isoformat()}}
         )
-
-class VerifyPaymentBody(BaseModel):
-    email: str    
+   
 
 @api.post("/verify-payment")
 async def verify_payment(body: VerifyPaymentBody, user: dict = Depends(get_current_user)):
