@@ -3014,15 +3014,3 @@ async def ensure_indexes():
     await db.push_devices.create_index([("user_id", 1), ("device_token", 1)], unique=True)
 
 
-from alru_cache import alru_cache
-
-# 🚀 Cache the results for 10 minutes (600 seconds)
-# Maximum 32 different cache variants allowed in memory
-@alru_cache(maxsize=32, ttl=600)
-async def fetch_home_data():
-    projection = {"_id": 0, "job_id": 1, "post_name": 1, "organization": 1, "last_date": 1, "salary": 1}
-    
-    trending = await db.jobs.find({"is_active": True}, projection).sort("trending_score", -1).limit(10).to_list(10)
-    latest = await db.jobs.find({"is_active": True}, projection).sort("created_at", -1).limit(10).to_list(10)
-    
-    return {"trending": trending, "latest": latest}
