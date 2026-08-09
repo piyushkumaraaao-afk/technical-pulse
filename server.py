@@ -28,6 +28,8 @@ from fastapi import BackgroundTasks, APIRouter
 from pymongo.errors import DuplicateKeyError
 from bson import ObjectId
 from contextlib import asynccontextmanager
+from tenacity import retry, stop_after_attempt, wait_exponential
+from sentence_transformers import SentenceTransformer
 
 import jwt
 import bcrypt
@@ -280,6 +282,14 @@ async def require_admin(user: dict = Depends(get_current_user)) -> dict:
     return user
 
 
+model = SentenceTransformer('all-MiniLM-L6-v2')
+
+def get_embedding(text: str) -> list:
+    if not text:
+        return []
+    embedding = model.encode(text)
+    return embedding.tolist()
+
 # =======================
 # Push Helper
 # =======================
@@ -379,17 +389,25 @@ def fallback_qualifications(title: str, summary: str, qualifications: list) -> l
         return qualifications
     text = f"{title} {summary}".lower()
     found = []
-    for phrase, label in (("12th", "12th"), ("intermediate", "12th"), ("iti", "ITI"), ("10th", "10th"), ("diploma", "Diploma"), ("graduate", "Graduate"), ("b.tech", "B.Tech"), ("btech", "B.Tech"), ("be", "B.Tech"), ("b.sc", "B.Sc"), ("bsc", "B.Sc")):
-        if phrase in text and label not in found: found.append(label)
-    return found or ["Not Specified"]
-
-def generate_content_hash(
-    organization: str,
-    post_name: str,
-    last_date: str
-) -> str:
-    text = f"{organization}|{post_name}|{last_date}"
-    return hashlib.sha256(text.lower().encode()).hexdigest()    
+    
+    # 🚀 Yahan humne saari nayi degrees add kar di hain
+    mapping = (
+        ("10th", "10th"), ("matric", "10th"), 
+        ("12th", "12th"), ("intermediate", "12th"), 
+        ("iti", "ITI"), 
+        ("diploma", "Diploma"), 
+        ("graduate", "Graduate"), ("degree", "Graduate"),
+        ("b.tech", "B.Tech"), ("btech", "B.Tech"), ("be", "B.Tech"), 
+        ("m.tech", "M.Tech"), ("mtech", "M.Tech"), ("me", "M.Tech"),
+        ("b.sc", "B.Sc"), ("bsc", "B.Sc"),
+        ("m.sc", "M.Sc"), ("msc", "M.Sc")
+    )
+    
+    for phrase, label in mapping:
+        if phrase in text and label not in found: 
+            found.append(label)
+            
+    return found or ["Not Specified"]    
 
 
 # =======================
@@ -1051,8 +1069,41 @@ async def get_job(job_id: str, user: dict = Depends(get_current_user)):
     return {"job": job}
 
 
-from fastapi import APIRouter, Depends, HTTPException
-# Aapke imports as usual yahan rahenge...
+@api.get("/jobs/by-qualifications")
+async def jobs_by_qualifications():
+    # Jin qualifications ki list aapko frontend par dikhani hai
+    target_quals = ["10th", "12th", "ITI", "Diploma", "B.Tech", "B.Sc", "M.Tech", "Graduate"]
+    results = {}
+    
+    # Data chota rakhne ke liye projection
+    projection = {
+        "_id": 0, 
+        "job_id": 1, 
+        "post_name": 1, 
+        "organization": 1, 
+        "last_date": 1, 
+        "qualifications": 1
+    }
+    
+    tasks = []
+    
+    # Har qualification ke liye task banayenge (parallel run ke liye)
+    for qual in target_quals:
+        tasks.append(
+            db.jobs.find(
+                {"is_active": True, "qualifications": qual},
+                projection
+            ).sort("created_at", -1).limit(10).to_list(10) # Har category ki top 10 jobs
+        )
+    
+    # Sabko ek saath fetch karenge (Super Fast!)
+    fetched_jobs = await asyncio.gather(*tasks)
+    
+    # Dictionary mein map kar denge
+    for qual, jobs in zip(target_quals, fetched_jobs):
+        results[qual] = jobs
+        
+    return results
 
 @api.post("/jobs/check-eligibility")
 async def check_eligibility(body: EligibilityCheckBody, user: dict = Depends(get_current_user)):
@@ -1839,6 +1890,12 @@ async def seed_admin():
             "created_at": datetime.now(timezone.utc).isoformat(),
         })
 
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+async def safe_groq_call(payload, headers):
+    async with httpx.AsyncClient(timeout=45.0) as ai_client:
+        resp = await ai_client.post(GROQ_URL, headers=headers, json=payload)
+        resp.raise_for_status()
+        return resp.json()
 
 # 1. Lifespan function define karein (Startup + Shutdown ek hi jagah)
 @asynccontextmanager
@@ -1917,6 +1974,7 @@ app.add_middleware(
 
 app.include_router(api)
 
+
 @api.get("/jobs/trending")
 async def trending_jobs():
 
@@ -1972,34 +2030,36 @@ async def closing_soon():
         ).sort("last_date",1).limit(20).to_list(20)
     }            
 
+import asyncio
+
 @api.get("/home")
 async def home():
+    # 1. Projection: Sirf zaroori fields laayein (Heavy data jaise description ignore karein)
+    projection = {
+        "_id": 0, 
+        "job_id": 1, 
+        "post_name": 1, 
+        "organization": 1, 
+        "post_type": 1, 
+        "last_date": 1, 
+        "salary": 1,
+        "is_active": 1,
+        "category": 1
+    }
+    
+    # 2. Teeno queries ko as a Task define karein (Abhi run nahi hongi)
+    trending_task = db.jobs.find({"is_active": True}, projection).sort("trending_score", -1).limit(10).to_list(10)
+    latest_task = db.jobs.find({"is_active": True}, projection).sort("created_at", -1).limit(10).to_list(10)
+    popular_task = db.jobs.find({"is_active": True}, projection).sort([("applications", -1), ("saves", -1)]).limit(10).to_list(10)
+    
+    # 3. asyncio.gather se teeno ko EK SATH (Parallel) database me daudein!
+    trending, latest, popular = await asyncio.gather(trending_task, latest_task, popular_task)
 
     return {
-        "trending": await db.jobs.find(
-            {"is_active": True},
-            {"_id": 0}
-        ).sort("trending_score",-1).limit(10).to_list(10),
-
-        "latest": await db.jobs.find(
-            {"is_active": True},
-            {"_id": 0}
-        ).sort("created_at",-1).limit(10).to_list(10),
-
-        "popular": await db.jobs.find(
-            {"is_active": True},
-            {"_id": 0}
-        ).sort([
-            ("applications",-1),
-            ("saves",-1)
-        ]).limit(10).to_list(10)
+        "trending": trending,
+        "latest": latest,
+        "popular": popular
     }
-
-from appwrite.id import ID
-from appwrite.query import Query
-
-# 1. MESSAGE SEND KARNE KE LIYE
-from datetime import datetime, timedelta
 
 @api.get("/api/users/search")
 async def search_users(email: str = "", current_user: dict = Depends(get_current_user)):
@@ -2020,6 +2080,33 @@ async def search_users(email: str = "", current_user: dict = Depends(get_current
         return users_list
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@api.get("/api/ai-search")
+async def ai_search(q: str):
+    user_query = q.strip()
+    if not user_query:
+        return {"jobs": []}
+    
+    # 1. User ki query ka embedding banao
+    query_vector = get_embedding(user_query)
+    
+    # 2. MongoDB Atlas ka $vectorSearch aggregation pipeline
+    pipeline = [
+        {
+            "$vectorSearch": {
+                "index": "vector_index",
+                "path": "job_embedding",
+                "queryVector": query_vector,
+                "numCandidates": 50,
+                "limit": 10
+            }
+        },
+        {"$match": {"is_active": True}},
+        {"$project": {"_id": 0, "job_id": 1, "post_name": 1, "organization": 1, "salary": 1, "post_type": 1}}
+    ]
+    
+    jobs = await db.jobs.aggregate(pipeline).to_list(10)
+    return {"jobs": jobs}        
 
 
 # --- 4. SEND MESSAGE ENDPOINT (With Disappearing Logic) ---
