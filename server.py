@@ -5,7 +5,6 @@ import uuid
 import logging
 import asyncio
 import feedparser
-import requests
 import json
 import httpx
 import hashlib
@@ -31,17 +30,18 @@ from bson import ObjectId
 from contextlib import asynccontextmanager
 from tenacity import retry, stop_after_attempt, wait_exponential
 from sentence_transformers import SentenceTransformer
+from fastapi.middleware.cors import CORSMiddleware
 
 import jwt
 import bcrypt
 from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
-from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from google.oauth2 import id_token
-from google.auth.transport import requests
+import requests
+from google.auth.transport import requests as google_requests
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -59,7 +59,7 @@ GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("careerpulse")
 
-# Mongo Client
+# Mongo Clientstr
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
 _push_client = None                         
@@ -845,31 +845,29 @@ async def admin_list_users(admin: dict = Depends(require_admin)):
 # --- Auth Endpoints ---
 @api.post("/auth/register")
 async def register(body: RegisterBody):
-    existing = await db.users.find_one({"email": body.email.lower()})
+    email = body.email.lower()
+    existing = await db.users.find_one({"email": email})
+    
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
-    user_id = f"user_{uuid.uuid4().hex[:12]}"
+    
+    # Email ko hi user_id bana diya
     doc = {
-        "user_id": user_id,
-        "email": body.email.lower(),
+        "user_id": email, 
+        "email": email,
         "name": body.name,
-        "phone": getattr(body, 'phone', None),
         "password_hash": hash_password(body.password),
         "auth_provider": "email",
         "is_admin": False,
-        "qualification": None,
-        "branch": None,
-        "subject": None,
-        "trade": None,
-        "passout_year": None,
-        "state": None,
-        "age": None,
         "avatar": None,
-        "notification_settings": {"job_alert": True, "admit_card": True, "result": True},    
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    
     await db.users.insert_one(doc)
-    token = create_jwt(user_id)
+    
+    # JWT token me bhi direct email chala jayega
+    token = create_jwt(email)
+    
     user_public = {k: v for k, v in doc.items() if k not in ("password_hash", "_id")}
     return {"access_token": token, "token_type": "bearer", "user": user_public}
 
@@ -889,28 +887,46 @@ class GoogleTokenBody(BaseModel):
 
 @api.post("/auth/google")
 async def google_login(body: GoogleTokenBody):
-    google_user = id_token.verify_oauth2_token(
-        body.id_token,
-        requests.Request(),
-        GOOGLE_CLIENT_ID
-    )
+    try:
+        # Token verify
+        google_user = id_token.verify_oauth2_token(
+            body.id_token,
+            google_requests.Request(),
+            GOOGLE_CLIENT_ID 
+        )
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Invalid Google Token")
+
     email = google_user["email"].lower()
     name = google_user.get("name", "")
+    avatar = google_user.get("picture", None)
 
     user = await db.users.find_one({"email": email})
+    
+    # Agar One Tap se naya user aata hai
     if not user:
-        user_id = f"user_{uuid.uuid4().hex[:12]}"
-        await db.users.insert_one({
-            "user_id": user_id,
+        new_user = {
+            "user_id": email, # Yaha bhi email hi user_id banega
             "email": email,
             "name": name,
+            "avatar": avatar,
             "auth_provider": "google",
-            "is_admin": False
-        })
-        user = await db.users.find_one({"email": email})
+            "is_admin": False,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await db.users.insert_one(new_user)
+        user = new_user
+    else:
+        # Agar purana user hai aur uski photo nahi thi, toh photo add kar do
+        if avatar and not user.get("avatar"):
+            await db.users.update_one({"email": email}, {"$set": {"avatar": avatar}})
+            user["avatar"] = avatar
 
+    # JWT token generate karein email (user_id) ke basis par
     token = create_jwt(user["user_id"])
-    return {"access_token": token, "user": user}
+    
+    user_public = {k: v for k, v in user.items() if k not in ("password_hash", "_id")}
+    return {"access_token": token, "token_type": "bearer", "user": user_public}
 
 
 @api.get("/auth/me")
