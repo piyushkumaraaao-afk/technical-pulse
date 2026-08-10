@@ -3107,19 +3107,28 @@ if __name__ == "__main__":
     import uvicorn
     uvicorn.run("server:app", host="127.0.0.1", port=8000, reload=True)
 
+from bson import ObjectId # (Agar pehle se import nahi hai toh add kar lijiye)
+from datetime import datetime, timezone
+from fastapi import WebSocket, WebSocketDisconnect
+
 @app.websocket("/ws/{user_id}")
 async def websocket_endpoint(websocket: WebSocket, user_id: str):
     await manager.connect(user_id, websocket)
     try:
         while True:
-            # Frontend se real-time data receive karna (Message ya Typing status)
+            # Frontend se real-time data receive karna
             data = await websocket.receive_json()
-            event_type = data.get("type") # "chat_message" ya "typing"
+            event_type = data.get("type") 
             
+            # 1. JAB NAYA MESSAGE AAYE
             if event_type == "chat_message":
                 receiver_id = data.get("receiver_id")
                 text = data.get("text")
                 job_data = data.get("job_data", None)
+                
+                # Check karein agar receiver online hai, toh direct "delivered", warna "sent"
+                # (Assuming aapke ConnectionManager mein 'active_connections' dict hai)
+                initial_status = "delivered" if receiver_id in manager.active_connections else "sent"
                 
                 # Database mein message save karein
                 message_doc = {
@@ -3127,6 +3136,7 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                     "receiver_id": receiver_id,
                     "text": text,
                     "type": "text" if not job_data else "job",
+                    "status": initial_status,  # Yahan sirf ek baar status set hoga
                     "job_data": job_data,
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     "deleted_for": []
@@ -3138,22 +3148,41 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                 if "_id" in message_doc:
                     del message_doc["_id"]
 
-                # 🚀 WHATSAPP STYLE: Agar user khud ko message kar raha hai (Self-Chat)
-                if user_id == receiver_id:
-                    await manager.send_personal_message(message_doc, user_id)
-                else:
-                    # Receiver ko message bhejo
+                # Sender ko echo bhejo (Single/Double tick dikhane ke liye)
+                await manager.send_personal_message(message_doc, user_id)
+                
+                # Receiver ko message bhejo (Agar khud ko nahi bhej raha)
+                if user_id != receiver_id and receiver_id in manager.active_connections:
                     await manager.send_personal_message(message_doc, receiver_id)
-                    # Sender ko bhi echo bhejo taaki uski screen par bina refresh ke tick/message dikh jaye
-                    await manager.send_personal_message(message_doc, user_id)
 
+            # 2. JAB TYPING HO
             elif event_type == "typing":
                 receiver_id = data.get("receiver_id")
-                if receiver_id and receiver_id != user_id:
+                if receiver_id and receiver_id != user_id and receiver_id in manager.active_connections:
                     await manager.send_personal_message({
                         "type": "typing",
                         "sender_id": user_id
                     }, receiver_id)
+            
+            # 3. JAB RECEIVER MESSAGE PADH LE (SEEN KAR LE)
+            elif event_type == "message_read":
+                message_id = data.get("message_id")
+                original_sender_id = data.get("sender_id") 
+                
+                # DB mein status "read" update karein
+                if message_id:
+                    await db.messages.update_one(
+                        {"_id": ObjectId(message_id)},
+                        {"$set": {"status": "read"}}
+                    )
+                
+                # Jisne message bheja tha, usko notify karein ki message read ho gaya (Green tick ke liye)
+                if original_sender_id in manager.active_connections:
+                    await manager.send_personal_message({
+                        "type": "message_status_update",
+                        "message_id": message_id,
+                        "status": "read"
+                    }, original_sender_id)
 
     except WebSocketDisconnect:
         manager.disconnect(user_id, websocket)    
