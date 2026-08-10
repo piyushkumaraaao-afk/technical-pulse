@@ -3165,32 +3165,26 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                     }, receiver_id)
             
             # 3. JAB RECEIVER MESSAGE PADH LE (SEEN KAR LE)
-            elif event_type == "message_read":
-                message_id = data.get("message_id")
-                original_sender_id = data.get("sender_id") 
-                
-                if message_id:
-                    try:
-                        from bson import ObjectId
-                        # Agar MongoDB ObjectId properly kaam kar raha hai
-                        await db.messages.update_one(
-                            {"_id": ObjectId(message_id)},
-                            {"$set": {"status": "read"}}
-                        )
-                    except Exception as e:
-                        # Fallback: Agar ID as a string save ho rahi hai
-                        await db.messages.update_one(
-                            {"id": message_id},
-                            {"$set": {"status": "read"}}
-                        )
-                
-                # Jisne message bheja tha, usko Green Tick bhejo
-                if original_sender_id in manager.active_connections:
-                    await manager.send_personal_message({
-                        "type": "message_status_update",
-                        "message_id": message_id,
-                        "status": "read"
-                    }, original_sender_id)
+            # 4. JAB KOI USER CHAT OPEN KARE (BULK READ)
+            elif event_type == "mark_chat_read":
+                chat_with = data.get("chat_with")
+                if chat_with:
+                    # Database mein is user ke bheje saare unread messages ko 'read' mark kar do
+                    await db.messages.update_many(
+                        {
+                            "sender_id": chat_with, 
+                            "receiver_id": user_id, 
+                            "status": {"$ne": "read"}
+                        },
+                        {"$set": {"status": "read"}}
+                    )
+                    
+                    # Jisne messages bheje the, usko notify karo ki uski chat open ho chuki hai
+                    if chat_with in manager.active_connections:
+                        await manager.send_personal_message({
+                            "type": "bulk_read_receipt",
+                            "reader_id": user_id
+                        }, chat_with)
 
     except WebSocketDisconnect:
         manager.disconnect(user_id, websocket)    
