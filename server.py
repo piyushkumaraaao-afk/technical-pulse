@@ -1,5 +1,6 @@
 """CareerPulse Backend - Job alert app for Diploma/BTech Indian engineering students."""
 import os
+import redis
 import uuid
 import logging
 import asyncio
@@ -15,10 +16,10 @@ from collections import defaultdict
 from bs4 import BeautifulSoup
 from pathlib import Path
 from datetime import datetime, timedelta, timezone, date
-from typing import List, Optional, Literal, Any, Dict
+from typing import List, Optional, Literal, Any, Dict, Set
 from fastapi.security import HTTPBearer
 from fastapi import FastAPI, Request, UploadFile, File, Depends, HTTPException, Header
-from fastapi import Query
+from fastapi import Query, WebSocket, WebSocketDisconnect
 from io import BytesIO
 import random
 import re
@@ -236,6 +237,43 @@ class AdSlot(BaseModel):
 
 class AdsPayload(BaseModel):
     ads: List[AdSlot]
+
+# --- WebSocket Connection Manager ---
+class ConnectionManager:
+    def __init__(self):
+        # Active connections: { user_id: Set[WebSocket] } (Ek user multi-device login ho toh sabko jaye)
+        self.active_connections: Dict[str, Set[WebSocket]] = {}
+
+    async def connect(self, user_id: str, websocket: WebSocket):
+        await websocket.accept()
+        if user_id not in self.active_connections:
+            self.active_connections[user_id] = set()
+        self.active_connections[user_id].add(websocket)
+
+    def disconnect(self, user_id: str, websocket: WebSocket):
+        if user_id in self.active_connections:
+            self.active_connections[user_id].discard(websocket)
+            if not self.active_connections[user_id]:
+                del self.active_connections[user_id]
+
+    async def send_personal_message(self, message: dict, user_id: str):
+        if user_id in self.active_connections:
+            for connection in self.active_connections[user_id]:
+                try:
+                    await connection.send_json(message)
+                except Exception:
+                    pass
+
+    async def broadcast_to_all(self, message: dict):
+        """ Sabhi online users ko live alert (jaise new trending job) bhejne ke liye """
+        for user_id, sockets in list(self.active_connections.items()):
+            for socket in sockets:
+                try:
+                    await socket.send_json(message)
+                except Exception:
+                    pass
+
+manager = ConnectionManager()    
 
 
 # =======================
@@ -2042,34 +2080,42 @@ async def closing_soon():
 
 import asyncio
 
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
+redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+
+# 2. Optimized /home Endpoint with Redis Cache
 @api.get("/home")
 async def home():
-    # 1. Projection: Sirf zaroori fields laayein (Heavy data jaise description ignore karein)
+    cache_key = "careerpulse_home_cache"
+    
+    # Step A: Check karein ki data Redis mein pehle se hai ya nahi
+    cached_data = redis_client.get(cache_key)
+    if cached_data:
+        # Agar cache mil gaya, toh database ko touch kiye bina turant return kar do! (Ultra Fast 🚀)
+        return json.loads(cached_data)
+
+    # Step B: Agar cache mein nahi hai, toh MongoDB se fetch karo
     projection = {
-        "_id": 0, 
-        "job_id": 1, 
-        "post_name": 1, 
-        "organization": 1, 
-        "post_type": 1, 
-        "last_date": 1, 
-        "salary": 1,
-        "is_active": 1,
-        "category": 1
+        "_id": 0, "job_id": 1, "post_name": 1, "organization": 1, 
+        "post_type": 1, "last_date": 1, "salary": 1, "is_active": 1, "category": 1
     }
     
-    # 2. Teeno queries ko as a Task define karein (Abhi run nahi hongi)
     trending_task = db.jobs.find({"is_active": True}, projection).sort("trending_score", -1).limit(10).to_list(10)
     latest_task = db.jobs.find({"is_active": True}, projection).sort("created_at", -1).limit(10).to_list(10)
     popular_task = db.jobs.find({"is_active": True}, projection).sort([("applications", -1), ("saves", -1)]).limit(10).to_list(10)
     
-    # 3. asyncio.gather se teeno ko EK SATH (Parallel) database me daudein!
     trending, latest, popular = await asyncio.gather(trending_task, latest_task, popular_task)
 
-    return {
+    response_data = {
         "trending": trending,
         "latest": latest,
         "popular": popular
     }
+
+    # Step C: Data ko Redis mein save kar dein taaki agli baar fast mile (Expire time: 10 minutes = 600 seconds)
+    redis_client.setex(cache_key, 600, json.dumps(response_data))
+
+    return response_data
 
 @api.get("/api/users/search")
 async def search_users(email: str = "", current_user: dict = Depends(get_current_user)):
@@ -2303,6 +2349,7 @@ async def edit_message(body: EditMessageBody, user: dict = Depends(get_current_u
     return {"message": "Message updated successfully"}
 
 from datetime import datetime, timedelta, timezone
+
 
 @api.post("/api/users/upgrade")
 async def upgrade_to_premium(body: UpgradePremiumBody, user: dict = Depends(get_current_user)):
@@ -3059,3 +3106,54 @@ app.add_middleware(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("server:app", host="127.0.0.1", port=8000, reload=True)
+
+@app.websocket("/ws/{user_id}")
+async def websocket_endpoint(websocket: WebSocket, user_id: str):
+    await manager.connect(user_id, websocket)
+    try:
+        while True:
+            # Frontend se real-time data receive karna (Message ya Typing status)
+            data = await websocket.receive_json()
+            event_type = data.get("type") # "chat_message" ya "typing"
+            
+            if event_type == "chat_message":
+                receiver_id = data.get("receiver_id")
+                text = data.get("text")
+                job_data = data.get("job_data", None)
+                
+                # Database mein message save karein
+                message_doc = {
+                    "sender_id": user_id,
+                    "receiver_id": receiver_id,
+                    "text": text,
+                    "type": "text" if not job_data else "job",
+                    "job_data": job_data,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "deleted_for": []
+                }
+                
+                result = await db.messages.insert_one(message_doc)
+                msg_id = str(result.inserted_id)
+                message_doc["id"] = msg_id
+                if "_id" in message_doc:
+                    del message_doc["_id"]
+
+                # 🚀 WHATSAPP STYLE: Agar user khud ko message kar raha hai (Self-Chat)
+                if user_id == receiver_id:
+                    await manager.send_personal_message(message_doc, user_id)
+                else:
+                    # Receiver ko message bhejo
+                    await manager.send_personal_message(message_doc, receiver_id)
+                    # Sender ko bhi echo bhejo taaki uski screen par bina refresh ke tick/message dikh jaye
+                    await manager.send_personal_message(message_doc, user_id)
+
+            elif event_type == "typing":
+                receiver_id = data.get("receiver_id")
+                if receiver_id and receiver_id != user_id:
+                    await manager.send_personal_message({
+                        "type": "typing",
+                        "sender_id": user_id
+                    }, receiver_id)
+
+    except WebSocketDisconnect:
+        manager.disconnect(user_id, websocket)    
