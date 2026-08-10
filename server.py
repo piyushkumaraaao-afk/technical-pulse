@@ -2127,7 +2127,6 @@ async def search_users(email: str = "", current_user: dict = Depends(get_current
         cursor = db.users.find(
             {
                 "email": {"$regex": email_query, "$options": "i"},
-                "user_id": {"$ne": current_user["user_id"]} # Apne aap ko search mein hide karein
             },
             {"_id": 0, "password_hash": 0}
         ).limit(10)
