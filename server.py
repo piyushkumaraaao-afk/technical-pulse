@@ -2279,8 +2279,49 @@ async def get_friends(user: dict = Depends(get_current_user)):
     # Un sabhi doston ka data fetch karo
     cursor = db.users.find({"user_id": {"$in": friend_ids}}, {"_id": 0, "password_hash": 0})
     friends_list = await cursor.to_list(length=100)
-    return friends_list
+    
+    # 🚀 NAYA ADVANCED LOGIC: Har friend ke liye Last Message aur Unread Count nikalo
+    for friend in friends_list:
+        friend_id = friend.get("user_id")
+        
+        # 1. Aakhri message nikalo (Sort by created_at DESC)
+        last_msg = await db.messages.find_one(
+            { 
+                "$or": [
+                    {"sender_id": my_id, "receiver_id": friend_id},
+                    {"sender_id": friend_id, "receiver_id": my_id}
+                ]
+            },
+            sort=[("created_at", -1)]
+        )
+        
+        if last_msg:
+            # Agar Job message hai toh special text, warna normal text
+            if last_msg.get("type") == "job" or last_msg.get("job_data"):
+                friend["last_message_text"] = "Job Post 🚀"
+            else:
+                friend["last_message_text"] = last_msg.get("text", "")
+            
+            friend["last_message_time"] = last_msg.get("created_at", "")
+        else:
+            friend["last_message_text"] = ""
+            friend["last_message_time"] = ""
+        
+        # 2. Unread messages ka count nikalo (Jo friend ne bheje hain aur read nahi hue)
+        unread_count = await db.messages.count_documents({
+            "sender_id": friend_id,
+            "receiver_id": my_id,
+            "status": {"$ne": "read"}
+        })
+        friend["unread_count"] = unread_count
 
+    # 3. List ko SORT karo (Taaki recent chat wale dost hamesha sabse upar rahein)
+    friends_list.sort(
+        key=lambda x: x.get("last_message_time") or "1970-01-01T00:00:00Z", 
+        reverse=True
+    )
+    
+    return friends_list
 # ==========================================
 # 2. DELETE MESSAGES (For Me / For Everyone)
 # ==========================================
