@@ -3169,14 +3169,22 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                 message_id = data.get("message_id")
                 original_sender_id = data.get("sender_id") 
                 
-                # DB mein status "read" update karein
                 if message_id:
-                    await db.messages.update_one(
-                        {"_id": ObjectId(message_id)},
-                        {"$set": {"status": "read"}}
-                    )
+                    try:
+                        from bson import ObjectId
+                        # Agar MongoDB ObjectId properly kaam kar raha hai
+                        await db.messages.update_one(
+                            {"_id": ObjectId(message_id)},
+                            {"$set": {"status": "read"}}
+                        )
+                    except Exception as e:
+                        # Fallback: Agar ID as a string save ho rahi hai
+                        await db.messages.update_one(
+                            {"id": message_id},
+                            {"$set": {"status": "read"}}
+                        )
                 
-                # Jisne message bheja tha, usko notify karein ki message read ho gaya (Green tick ke liye)
+                # Jisne message bheja tha, usko Green Tick bhejo
                 if original_sender_id in manager.active_connections:
                     await manager.send_personal_message({
                         "type": "message_status_update",
