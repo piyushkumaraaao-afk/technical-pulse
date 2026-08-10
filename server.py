@@ -1,5 +1,6 @@
 """CareerPulse Backend - Job alert app for Diploma/BTech Indian engineering students."""
 import os
+import uvicorn
 import redis
 import uuid
 import logging
@@ -3160,8 +3161,12 @@ app.add_middleware(
 
     # Check kariye kya aapke server.py ke end me aisa kuch hai:
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("server:app", host="127.0.0.1", port=8000, reload=True)
+    # Railway automatically PORT assign karta hai, nahi toh default 8000 lega
+    port = int(os.environ.get("PORT", 8000))
+    
+    # host="0.0.0.0" karne se server internet se connect ho pata hai
+    # Live server par reload=False rakhna accha hota hai
+    uvicorn.run("server:app", host="0.0.0.0", port=port, reload=False)
 
 from bson import ObjectId # (Agar pehle se import nahi hai toh add kar lijiye)
 from datetime import datetime, timezone
