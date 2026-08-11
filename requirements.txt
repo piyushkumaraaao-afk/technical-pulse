@@ -5,3 +5,4 @@ groq
 pymongo
 websockets
 python-dotenv
+redis
