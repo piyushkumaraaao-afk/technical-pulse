@@ -2342,7 +2342,7 @@ async def get_friends(user: dict = Depends(get_current_user)):
 # ==========================================
 # 2. DELETE MESSAGES (For Me / For Everyone)
 # ==========================================
-@api.post("/api/messages/delete")
+@api.post("/messages/delete")
 async def delete_messages(body: DeleteMessagesBody, user: dict = Depends(get_current_user)):
     my_id = user["user_id"]
     
@@ -2383,7 +2383,7 @@ async def delete_messages(body: DeleteMessagesBody, user: dict = Depends(get_cur
 
     return {"message": "Invalid operation"}
 
-@api.put("/api/messages/edit")
+@api.put("/messages/edit")
 async def edit_message(body: EditMessageBody, user: dict = Depends(get_current_user)):
     my_id = user["user_id"]
     
@@ -2408,7 +2408,7 @@ async def edit_message(body: EditMessageBody, user: dict = Depends(get_current_u
 from datetime import datetime, timedelta, timezone
 
 
-@api.post("/api/users/upgrade")
+@api.post("/users/upgrade")
 async def upgrade_to_premium(body: UpgradePremiumBody, user: dict = Depends(get_current_user)):
     my_id = user["user_id"]
     
@@ -2428,7 +2428,7 @@ async def upgrade_to_premium(body: UpgradePremiumBody, user: dict = Depends(get_
     return {"message": "Welcome to Premium!", "is_premium": True, "expires_at": expiry_date.isoformat()}
 
 
-@api.post("/api/razorpay-webhook")
+@api.post("/razorpay-webhook")
 async def razorpay_webhook(request: Request, x_razorpay_signature: str = Header(None)):
     # 1. Razorpay se aaya hua raw data read karein
     payload = await request.body()
@@ -2480,7 +2480,7 @@ async def razorpay_webhook(request: Request, x_razorpay_signature: str = Header(
 class VerifyPaymentBody(BaseModel):
     email: str    
 
-@api.post("/api/verify-payment")
+@api.post("/verify-payment")
 async def verify_payment(body: VerifyPaymentBody, user: dict = Depends(get_current_user)):
     # 1. Database mein us user ka record find karein
     user_db = await db.users.find_one({"email": body.email})
@@ -2538,7 +2538,7 @@ UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # 1. Get Ads (Users aur Admin ke liye)
-@api.get("/api/ads")
+@api.get("/ads")
 async def get_ads():
     ad_doc = await db.ads.find_one(sort=[('_id', -1)])
     if ad_doc and "ads" in ad_doc:
@@ -2547,7 +2547,7 @@ async def get_ads():
     return {"ads": []}
 
 # 2. Save Ads (Admin Panel se save karne ke liye)
-@api.post("/api/admin/ads")
+@api.post("/admin/ads")
 async def save_admin_ads(payload: AdsPayload, admin: dict = Depends(require_admin)):
     # 💡 Pydantic automatically React Native ke data ko parse kar lega
     ads_data = [{"id": ad.id, "image": ad.image, "link": ad.link} for ad in payload.ads]
@@ -2562,7 +2562,7 @@ async def save_admin_ads(payload: AdsPayload, admin: dict = Depends(require_admi
     return {"success": True, "message": "Ads properly saved to MongoDB"}
 
 # 3. Upload Ad Image (Gallery preview ke liye)
-@api.post("/api/admin/upload-ad-image")
+@api.post("/admin/upload-ad-image")
 async def upload_ad_image(request: Request, image: UploadFile = File(...), admin: dict = Depends(require_admin)):
     if not image:
         raise HTTPException(status_code=400, detail="No image file provided")
