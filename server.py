@@ -95,7 +95,7 @@ razorpay_client = razorpay.Client(
     )
 )
 
-@app.post("/create-order")
+@api.post("/create-order")
 def create_order():
     order = razorpay_client.order.create({
         "amount": 1000,  # ₹10 = 1000 paise
@@ -2272,7 +2272,7 @@ async def add_friend(body: FriendBody, user: dict = Depends(get_current_user)):
     
     return {"message": "Friend added successfully"}
 
-@api.post("/api/friends/remove")
+@api.post("/friends/remove")
 async def remove_friend(body: FriendBody, user: dict = Depends(get_current_user)):
     my_id = user["user_id"]
     friend_id = body.friend_id
@@ -2283,7 +2283,7 @@ async def remove_friend(body: FriendBody, user: dict = Depends(get_current_user)
     
     return {"message": "Friend removed successfully"}
 
-@api.get("/api/friends")
+@api.get("/friends")
 async def get_friends(user: dict = Depends(get_current_user)):
     my_id = user["user_id"]
     # User ka document nikalo
@@ -2502,7 +2502,7 @@ async def verify_payment(body: VerifyPaymentBody, user: dict = Depends(get_curre
             "message": "Payment not received yet. Please wait a minute or refresh."
         }
 
-@api.get("/api/jobs/for-you")
+@api.get("/jobs/for-you")
 async def for_you(user: dict = Depends(get_current_user)):
     try:
         user_branch = user.get("branch", [])
