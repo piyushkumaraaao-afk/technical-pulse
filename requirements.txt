@@ -6,3 +6,9 @@ pymongo
 websockets
 python-dotenv
 redis
+feedparser
+requests
+httpx
+pydantic
+starlette
+typing-extensions
